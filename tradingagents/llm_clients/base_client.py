@@ -2,13 +2,9 @@ import abc
 import time
 import logging
 from typing import List, Dict, Tuple, Any, Optional
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type #, before_sleep_log
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# Configure basic logging for the module
-# It's generally better to configure basicConfig at the application entry point.
-# Libraries should just obtain loggers.
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__) # Logger name will be 'tradingagents.llm_clients.base_client'
+logger = logging.getLogger(__name__)
 
 # --- Custom Exceptions for Retry Logic and Error Handling ---
 class LLMBaseException(Exception):
@@ -39,33 +35,35 @@ class LLMResponseError(LLMBaseException):
     """Error related to the LLM's response (e.g., empty, malformed, safety blocked)."""
     pass
 
+class LLMKeyCycleError(LLMTransientError):
+    """
+    Special transient error used by multi-key clients to signal that the current key failed
+    and the retry mechanism should cycle to the next key and try again.
+    """
+    def __init__(self, message, failed_key: Optional[str] = None, original_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.failed_key = failed_key
+        self.original_exception = original_exception
+
 
 # --- Default Retry Configuration ---
-# Define common transient exceptions from popular HTTP libraries if used directly by SDKs,
-# or rely on SDKs to raise their own specific transient errors.
-# For now, we'll primarily rely on our custom LLMTransientError and its children.
-# SDK-specific transient errors can be caught by client implementations and re-raised as LLMTransientError.
 DEFAULT_RETRY_EXCEPTIONS: Tuple[type[Exception], ...] = (
-    LLMTransientError, # Includes RateLimit and ServiceUnavailable by inheritance
-    # Example: Add requests.exceptions.Timeout, requests.exceptions.ConnectionError if making direct HTTP calls
+    LLMTransientError, # Includes RateLimit, ServiceUnavailable, and KeyCycleError by inheritance
 )
 
-# Helper for logging before sleep, compatible with tenacity's before_sleep argument
 def log_retry_attempt(retry_state: Any) -> None:
+    """Helper for logging before sleep, compatible with tenacity's before_sleep argument."""
+    exc_info = retry_state.outcome.exception()
+    failed_key_info = ""
+    if isinstance(exc_info, LLMKeyCycleError) and exc_info.failed_key:
+        failed_key_info = f" (Key: {exc_info.failed_key})"
+
     logger.warning(
-        f"Retrying LLM API call: {retry_state.fn.__name__ if retry_state.fn else 'N/A'} "
-        f"due to {retry_state.outcome.exception()!r}, "
+        f"Retrying LLM API call: {retry_state.fn.__name__ if retry_state.fn else 'N/A'}{failed_key_info} "
+        f"due to {exc_info!r}, "
         f"attempt number {retry_state.attempt_number} after {retry_state.seconds_since_start:.2f}s. "
         f"Waiting {retry_state.next_action.sleep:.2f}s before next attempt."
     )
-
-DEFAULT_RETRY_DECORATOR = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(DEFAULT_RETRY_EXCEPTIONS),
-    before_sleep=log_retry_attempt # Use the helper for logging
-    # reraise=True # Default is False, meaning tenacity returns the result of the last attempt. If True, it re-raises the last exception. We want to handle this in client methods.
-)
 
 class BaseLLMClient(abc.ABC):
     """
@@ -73,137 +71,146 @@ class BaseLLMClient(abc.ABC):
     Defines a standardized interface for interacting with different LLM providers.
     """
 
+    DEFAULT_RETRY_ATTEMPTS = 3
+    DEFAULT_RETRY_MIN_WAIT_SECONDS = 2
+    DEFAULT_RETRY_MAX_WAIT_SECONDS = 10
+
     def __init__(self, api_key: Optional[str] = None, config: Optional[Dict] = None):
-        """
-        Initialize the client.
-        Args:
-            api_key (str, optional): The API key for the LLM provider.
-            config (Dict, optional): Additional configuration parameters.
-                                     Expected: 'model' (default text model), 'embedding_model'.
-        """
-        self.api_key = api_key
+        self.api_key = api_key # For single API key clients. Multi-key clients will handle keys differently.
         self.config = config if config else {}
-        self.model_name = self.config.get("model")
-        self.embedding_model_name = self.config.get("embedding_model")
-        if not self.model_name:
-            logger.warning(f"{self.__class__.__name__}: Default text model ('model') not found in config.")
-        if not self.embedding_model_name:
-            logger.warning(f"{self.__class__.__name__}: Default embedding model ('embedding_model') not found in config.")
 
+        # Default models for this client instance
+        self.model_name = self.config.get("model") or self.config.get("default_text_model")
+        self.embedding_model_name = self.config.get("embedding_model") or self.config.get("default_embedding_model")
+
+        # Retry settings for this client instance
+        self.retry_attempts = self.config.get("retry_attempts", self.DEFAULT_RETRY_ATTEMPTS)
+        self.retry_min_wait = self.config.get("retry_min_wait_seconds", self.DEFAULT_RETRY_MIN_WAIT_SECONDS)
+        self.retry_max_wait = self.config.get("retry_max_wait_seconds", self.DEFAULT_RETRY_MAX_WAIT_SECONDS)
+
+        # Log warnings if default models are not found, as they are often essential.
+        if not self.model_name and self.__class__._generate_text_impl != BaseLLMClient._generate_text_impl: # only if subclass implements it
+            logger.warning(f"{self.__class__.__name__}: Default text model ('model' or 'default_text_model') not found in config.")
+        if not self.embedding_model_name and self.__class__._get_embedding_impl != BaseLLMClient._get_embedding_impl: # only if subclass implements it
+            logger.debug(f"{self.__class__.__name__}: Default embedding model ('embedding_model' or 'default_embedding_model') not found in config.")
 
     @abc.abstractmethod
-    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str) -> str:
-        """Implementation specific to the LLM provider for generating text."""
+    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> str:
         pass
 
     @abc.abstractmethod
-    def _get_embedding_impl(self, text: str, model: str) -> List[float]:
-        """Implementation specific to the LLM provider for generating embeddings."""
+    def _get_embedding_impl(self, text: str, model: str, current_api_key_for_request: Optional[str]) -> List[float]:
         pass
 
-    # Optional chat method
     # @abc.abstractmethod
-    # def _chat_impl(self, messages: List[Dict[str, str]], temperature: float, max_tokens: Optional[int], model: str) -> Dict:
-    #    """Implementation specific to the LLM provider for chat."""
+    # def _chat_impl(self, messages: List[Dict[str, str]], temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> Dict:
     #    pass
 
-    # Decorated methods call the internal implementations
-    @DEFAULT_RETRY_DECORATOR
+    def _get_retry_decorator(self) -> Any:
+        """Constructs a tenacity retry decorator based on client's retry settings."""
+        return retry(
+            stop=stop_after_attempt(self.retry_attempts),
+            wait=wait_exponential(multiplier=1, min=self.retry_min_wait, max=self.retry_max_wait),
+            retry=retry_if_exception_type(DEFAULT_RETRY_EXCEPTIONS),
+            before_sleep=log_retry_attempt,
+            reraise=True # Re-raise the last exception if all retries fail
+        )
+
+    def _get_current_api_key_for_request(self) -> Optional[str]:
+        """
+        Placeholder for subclasses (like multi-key clients) to override.
+        Base implementation returns the single self.api_key.
+        Multi-key clients will implement cycling logic here.
+        This key is primarily for logging and for SDK configuration if needed per call.
+        """
+        return self.api_key
+
     def generate_text(self, prompt: str, temperature: float = 0.7, max_tokens: Optional[int] = 1500, model: Optional[str] = None) -> str:
-        """
-        Generates text based on a given prompt with retry logic.
-        """
         start_time = time.time()
         effective_model = model or self.model_name
         if not effective_model:
             raise LLMConfigurationError(f"{self.__class__.__name__}: No model specified for generate_text and no default text model configured.")
 
-        logger.debug(f"Attempting generate_text with model {effective_model}. Prompt: \"{prompt[:100]}...\"")
-        try:
-            result = self._generate_text_impl(prompt, temperature, max_tokens, effective_model)
-            # _log_usage might be called within _generate_text_impl by subclasses if they have token info
-            return result
-        except Exception as e: # Catch-all for non-retryable or SDK-specific errors not mapped to custom ones
-            self._handle_api_error(e, operation_name="generate_text", model_name=effective_model) # Will re-raise
-        finally: # This will always execute, even if retry happens or an error is re-raised
-            end_time = time.time()
-            logger.info(f"generate_text call completed for model {effective_model}. Duration: {end_time - start_time:.2f}s")
-        return "" # Should not be reached if _handle_api_error re-raises
+        api_key_for_this_call = None # Will be set inside the retried function if multi-key
 
-    @DEFAULT_RETRY_DECORATOR
+        # Define the function to be retried
+        def _try_generate():
+            nonlocal api_key_for_this_call # Allow modification of outer scope variable
+            # For multi-key clients, _get_current_api_key_for_request will handle cycling & configuration.
+            # For single-key, it just returns self.api_key (or the one from env).
+            api_key_for_this_call = self._get_current_api_key_for_request()
+            logger.debug(f"Attempting generate_text with model {effective_model} (Key: {'HIDDEN' if api_key_for_this_call else 'None'}). Prompt: \"{prompt[:100]}...\"")
+            return self._generate_text_impl(prompt, temperature, max_tokens, effective_model, api_key_for_this_call)
+
+        try:
+            decorated_try_generate = self._get_retry_decorator()(_try_generate)
+            result = decorated_try_generate()
+            return result
+        except LLMBaseException: # Re-raise our custom errors directly
+            raise
+        except Exception as e: # Wrap other unexpected errors
+            logger.error(f"Unexpected, non-LLMBaseException error during generate_text with model {effective_model}: {e.__class__.__name__} - {e}")
+            self._handle_api_error(e, operation_name="generate_text", model_name=effective_model, api_key_used=api_key_for_this_call) # Will re-raise
+            return "" # Should not be reached if _handle_api_error re-raises
+        finally:
+            end_time = time.time()
+            key_info = f"(Key: {'HIDDEN' if api_key_for_this_call else 'None'})" if api_key_for_this_call is not None else "" # Check if it was set
+            logger.info(f"generate_text call for model {effective_model} {key_info} completed. Duration: {end_time - start_time:.2f}s")
+
+
     def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
-        """
-        Generates an embedding for a given text with retry logic.
-        """
         start_time = time.time()
         effective_model = model or self.embedding_model_name
         if not effective_model:
             raise LLMConfigurationError(f"{self.__class__.__name__}: No model specified for get_embedding and no default embedding model configured.")
 
-        logger.debug(f"Attempting get_embedding for model {effective_model}. Text: \"{text[:100]}...\"")
+        api_key_for_this_call = None
+
+        def _try_embed():
+            nonlocal api_key_for_this_call
+            api_key_for_this_call = self._get_current_api_key_for_request()
+            logger.debug(f"Attempting get_embedding for model {effective_model} (Key: {'HIDDEN' if api_key_for_this_call else 'None'}). Text: \"{text[:100]}...\"")
+            return self._get_embedding_impl(text, effective_model, api_key_for_this_call)
+
         try:
-            result = self._get_embedding_impl(text, effective_model)
+            decorated_try_embed = self._get_retry_decorator()(_try_embed)
+            result = decorated_try_embed()
             return result
+        except LLMBaseException:
+            raise
         except Exception as e:
-            self._handle_api_error(e, operation_name="get_embedding", model_name=effective_model)
+            logger.error(f"Unexpected, non-LLMBaseException error during get_embedding with model {effective_model}: {e.__class__.__name__} - {e}")
+            self._handle_api_error(e, operation_name="get_embedding", model_name=effective_model, api_key_used=api_key_for_this_call)
+            return [] # Should not be reached
         finally:
             end_time = time.time()
-            logger.info(f"get_embedding call completed for model {effective_model}. Duration: {end_time - start_time:.2f}s")
-        return [] # Should not be reached
+            key_info = f"(Key: {'HIDDEN' if api_key_for_this_call else 'None'})" if api_key_for_this_call is not None else ""
+            logger.info(f"get_embedding call for model {effective_model} {key_info} completed. Duration: {end_time - start_time:.2f}s")
 
-    # @DEFAULT_RETRY_DECORATOR
-    # def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: Optional[int] = 1500, model: Optional[str] = None) -> Dict:
-    #     start_time = time.time()
-    #     effective_model = model or self.model_name
-    #     if not effective_model:
-    #         raise LLMConfigurationError(f"{self.__class__.__name__}: No model specified for chat and no default text model configured.")
-    #     logger.debug(f"Attempting chat with model {effective_model}.")
-    #     try:
-    #         result = self._chat_impl(messages, temperature, max_tokens, effective_model)
-    #         return result
-    #     except Exception as e:
-    #         self._handle_api_error(e, operation_name="chat", model_name=effective_model)
-    #     finally:
-    #         end_time = time.time()
-    #         logger.info(f"chat call completed for model {effective_model}. Duration: {end_time - start_time:.2f}s")
-    #     return {} # Should not be reached
+    # def chat(...) would follow a similar pattern
 
-    def _handle_api_error(self, error: Exception, operation_name: str, model_name: str):
-        """
-        Handles common API errors. Subclasses should call this or implement more specific handling,
-        and then re-raise either the original error or a custom LLMBaseException.
-        This base implementation will re-raise the original error if not mapped.
-        Subclasses are responsible for mapping SDK-specific errors to custom LLMTransientError etc.
-        """
-        logger.error(f"API Error during {operation_name} with model {model_name}: {error.__class__.__name__} - {error}")
+    def _handle_api_error(self, error: Exception, operation_name: str, model_name: str, api_key_used: Optional[str]):
+        key_info = f"(Key: {'HIDDEN' if api_key_used else 'None'})" if api_key_used is not None else ""
+        logger.error(f"API Error during {operation_name} with model {model_name} {key_info}: {error.__class__.__name__} - {error}")
+        if not isinstance(error, LLMBaseException):
+            # Wrap unknown errors into a generic LLMBaseException if not already one of our custom types.
+            # This helps ensure that callers can expect LLMBaseException or its children.
+            raise LLMBaseException(f"Unhandled error during {operation_name}: {error}") from error
+        raise error # Re-raise the (potentially wrapped) error
 
-        # Example: if a subclass identified a specific SDK error as transient:
-        # if isinstance(error, SomeSDKTransientError):
-        #     raise LLMTransientError(f"Transient error from SDK: {error}") from error
-        # if isinstance(error, SomeSDKRateLimitError):
-        #     raise LLMRateLimitError(f"Rate limit from SDK: {error}") from error
-
-        if not isinstance(error, LLMBaseException): # If it's not already one of our custom errors
-            # General fallback: wrap unknown errors if needed, or just re-raise
-            # For now, just re-raise to ensure it's not silently swallowed if not mapped by subclass.
-            pass # Subclass should handle mapping or re-raising
-
-        raise error
-
-
-    def _log_usage(self, model_name: str, prompt_tokens: Optional[int] = None, completion_tokens: Optional[int] = None, total_tokens: Optional[int] = None):
-        """
-        Logs token usage if available from the API response. Called by subclasses.
-        """
+    def _log_usage(self, model_name: str,
+                   prompt_tokens: Optional[int] = None,
+                   completion_tokens: Optional[int] = None,
+                   total_tokens: Optional[int] = None,
+                   api_key_used: Optional[str] = None):
         usage_parts = [f"Model: {model_name}"]
-        if prompt_tokens is not None:
-            usage_parts.append(f"Prompt Tokens: {prompt_tokens}")
-        if completion_tokens is not None:
-            usage_parts.append(f"Completion Tokens: {completion_tokens}")
-        if total_tokens is not None:
-            usage_parts.append(f"Total Tokens: {total_tokens}")
+        if api_key_used: # In a multi-key setup, knowing which key was used for a successful call is useful
+            usage_parts.append(f"Key: {'HIDDEN'}") # Don't log actual key value for security
+        if prompt_tokens is not None: usage_parts.append(f"PromptTokens: {prompt_tokens}")
+        if completion_tokens is not None: usage_parts.append(f"CompletionTokens: {completion_tokens}")
+        if total_tokens is not None: usage_parts.append(f"TotalTokens: {total_tokens}")
 
-        if len(usage_parts) > 1: # Only log if there's more than just model name
-            logger.info(f"Token Usage - {', '.join(usage_parts)}")
+        if len(usage_parts) > (2 if api_key_used else 1) : # Log if more than just model/key
+            logger.info(f"TokenUsage - {', '.join(usage_parts)}")
         else:
             logger.debug(f"Token usage details not available for this call with {model_name}.")

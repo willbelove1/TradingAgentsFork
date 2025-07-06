@@ -12,65 +12,127 @@ from tradingagents.llm_clients.base_client import (
     BaseLLMClient, logger,
     LLMTransientError, LLMRateLimitError, LLMServiceUnavailableError,
     LLMAuthenticationError, LLMConfigurationError, LLMResponseError
+import itertools # For API key cycling
+
+# Import google_exceptions and custom LLM exceptions from base_client
+import google.generativeai as genai
+import google.api_core.exceptions as google_exceptions
+
+from tradingagents.llm_clients.base_client import (
+    BaseLLMClient, logger,
+    LLMTransientError, LLMRateLimitError, LLMServiceUnavailableError,
+    LLMAuthenticationError, LLMConfigurationError, LLMResponseError,
+    LLMKeyCycleError # Import the new exception
 )
 
 class GeminiClient(BaseLLMClient):
     """
-    LLM Client for Google's Gemini models.
+    LLM Client for Google's Gemini models, with API key cycling and retry logic.
     """
-
-    # Default model names, can be overridden by config
-    DEFAULT_TEXT_MODEL = "gemini-pro"  # Or a more specific version like "gemini-1.5-flash"
+    DEFAULT_TEXT_MODEL = "gemini-1.5-flash"
     DEFAULT_EMBEDDING_MODEL = "models/embedding-001"
-    # For Gemini 1.5 Pro, vision model is usually the same as the text model.
-    # For older models, it might be "gemini-pro-vision".
-    # The SDK generally handles multimodal capabilities within the same model endpoint for newer models.
 
     def __init__(self, api_key: Optional[str] = None, config: Optional[Dict] = None):
         """
         Initializes the Gemini client.
         Args:
-            api_key (str, optional): Google AI API key. If None, attempts to use GOOGLE_API_KEY environment variable.
-            config (Dict, optional): Configuration dictionary. Expected keys:
-                - 'model': Name of the default text generation model (e.g., 'gemini-1.5-pro').
-                - 'embedding_model': Name of the default embedding model (e.g., 'models/embedding-001').
+            api_key (str, optional): A single Google AI API key (acts as fallback or if no list in config).
+            config (Dict, optional): Configuration dictionary. Expected keys under `google_config` (or top-level):
+                - 'api_keys': List of Google AI API keys for cycling.
+                - 'model' / 'default_text_model': Name of the default text generation model.
+                - 'embedding_model' / 'default_embedding_model': Name of the default embedding model.
+                - Retry settings: 'retry_attempts', 'retry_min_wait_seconds', 'retry_max_wait_seconds'.
         """
-        super().__init__(api_key, config)
+        super().__init__(api_key, config) # api_key here is the single one, config has all settings
 
-        resolved_api_key = self.api_key or os.getenv("GOOGLE_API_KEY")
-        if not resolved_api_key:
-            # Attempt to load from .env if python-dotenv is available
+        # API Key Management for Cycling
+        self.api_keys_list: List[str] = []
+        # Prioritize list of keys from config
+        if isinstance(self.config.get("api_keys"), list) and self.config["api_keys"]:
+            self.api_keys_list = [key for key in self.config["api_keys"] if key] # Filter out empty strings
+
+        # Fallback to single api_key from constructor (which might be from env GOOGLE_API_KEY via get_llm_client)
+        if not self.api_keys_list and self.api_key:
+            self.api_keys_list.append(self.api_key)
+
+        # Fallback to GOOGLE_API_KEY env var if still no keys
+        if not self.api_keys_list:
+            env_api_key = os.getenv("GOOGLE_API_KEY")
+            if env_api_key:
+                self.api_keys_list.append(env_api_key)
+            else: # Try .env
+                try:
+                    from dotenv import load_dotenv
+                    load_dotenv()
+                    env_api_key_dotenv = os.getenv("GOOGLE_API_KEY")
+                    if env_api_key_dotenv:
+                        self.api_keys_list.append(env_api_key_dotenv)
+                except ImportError:
+                    logger.debug("python-dotenv not installed, cannot load GOOGLE_API_KEY from .env for GeminiClient key list.")
+
+        if not self.api_keys_list:
+            raise LLMConfigurationError(
+                "GeminiClient: No API keys found. Provide 'api_keys' in google_config (model_settings.yaml), "
+                "as a constructor argument, or set GOOGLE_API_KEY environment variable."
+            )
+
+        self.api_key_cycler = itertools.cycle(self.api_keys_list)
+        self.current_api_key_for_sdk: Optional[str] = None # Key currently configured with genai SDK
+
+        # Initialize the SDK with the first key. It will be re-configured on key cycling.
+        self._configure_sdk_with_next_key()
+
+        # Default model names from config or class defaults
+        self.model_name = self.config.get("model") or self.config.get("default_text_model") or self.DEFAULT_TEXT_MODEL
+        self.embedding_model_name = self.config.get("embedding_model") or self.config.get("default_embedding_model") or self.DEFAULT_EMBEDDING_MODEL
+
+        # _sdk_model instance is created per call in _generate_text_impl if model changes
+        # No need to initialize self._sdk_model here for a specific default model if it's handled per-call
+
+        logger.info(
+            f"GeminiClient initialized with {len(self.api_keys_list)} API key(s). "
+            f"Default text model: {self.model_name}, Default embedding model: {self.embedding_model_name}. "
+            f"Retry config: {self.retry_attempts} attempts, wait {self.retry_min_wait}-{self.retry_max_wait}s."
+        )
+
+    def _configure_sdk_with_next_key(self) -> str:
+        """Gets the next API key and configures the genai SDK with it."""
+        new_key = next(self.api_key_cycler)
+        if new_key != self.current_api_key_for_sdk: # Avoid re-configuring if key hasn't changed (e.g. only one key)
+            logger.info(f"GeminiClient: Configuring SDK with new API key (ending with ...{new_key[-4:] if len(new_key) > 4 else new_key}).")
             try:
-                from dotenv import load_dotenv
-                load_dotenv()
-                resolved_api_key = os.getenv("GOOGLE_API_KEY")
-            except ImportError:
-                logger.info("python-dotenv not installed, cannot load GOOGLE_API_KEY from .env file.")
+                genai.configure(api_key=new_key)
+                self.current_api_key_for_sdk = new_key
+            except Exception as e: # Catch potential errors during genai.configure itself
+                logger.error(f"GeminiClient: Failed to configure SDK with API key ...{new_key[-4:]}: {e}")
+                # This is a configuration error for this key, but we want to cycle, so raise LLMKeyCycleError
+                raise LLMKeyCycleError(f"Failed to configure genai SDK with key ...{new_key[-4:]}", failed_key=new_key, original_exception=e) from e
+        return new_key
 
-            if not resolved_api_key:
-                raise ValueError("GOOGLE_API_KEY not found. Please set it as an environment variable, pass it to the constructor, or ensure it's in a .env file.")
-
-        genai.configure(api_key=resolved_api_key)
-
-        self.model_name = self.config.get("model", self.DEFAULT_TEXT_MODEL)
-        self.embedding_model_name = self.config.get("embedding_model", self.DEFAULT_EMBEDDING_MODEL)
-
-        # Initialize the generative model instance.
-        # We can re-initialize if a different model is passed to generate_text,
-        # or create a dictionary of model instances if frequently switching.
-        # For simplicity, we'll use one default and allow overriding.
+    def _get_current_api_key_for_request(self) -> Optional[str]:
+        """
+        Overrides BaseLLMClient to provide key cycling for Gemini.
+        Ensures the SDK is configured with the key to be used for the upcoming attempt.
+        This is called by BaseLLMClient's retry wrapper before each attempt of _impl methods.
+        """
         try:
-            self._sdk_model = genai.GenerativeModel(self.model_name)
-            # For embeddings, the model name is passed directly to the embed_content function.
-        except Exception as e:
-            logger.error(f"Failed to initialize Gemini GenerativeModel with {self.model_name}: {e}")
-            self._handle_api_error(e)
+            # This will get a key and configure the SDK with it.
+            # If _configure_sdk_with_next_key itself fails (e.g., bad key format for genai.configure),
+            # it raises LLMKeyCycleError, which is a LLMTransientError, so tenacity will retry.
+            # During the retry, a new key will be picked.
+            return self._configure_sdk_with_next_key()
+        except LLMKeyCycleError: # Already an LLMKeyCycleError, let tenacity handle it
+            raise
+        except Exception as e: # Should not happen if _configure_sdk_with_next_key handles its errors
+            logger.error(f"GeminiClient: Unexpected error in _get_current_api_key_for_request: {e}")
+            raise LLMKeyCycleError("Unexpected error getting next API key", original_exception=e) from e
 
-        logger.info(f"GeminiClient initialized. Default text model: {self.model_name}, Default embedding model: {self.embedding_model_name}")
 
-    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str) -> str:
-        # 'model' here is the effective_model determined by the public method
-        current_model_name = model
+    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> str:
+        # `current_api_key_for_request` is the key that BaseLLMClient._get_current_api_key_for_request (our override)
+        # has just configured for this attempt. We log it but don't need to use it directly for genai.GenerativeModel
+        # as genai.configure() is global for the SDK.
+        current_model_name = model # `model` is the effective_model (default or override)
 
         generation_config = genai.types.GenerationConfig(
             temperature=temperature
@@ -134,14 +196,14 @@ class GeminiClient(BaseLLMClient):
             raise LLMResponseError(f"Gemini content generation stopped (safety/policy): {e}") from e
         except Exception as e: # Catch-all for other google_exceptions or unexpected errors
             logger.error(f"Unexpected Gemini API error during text generation with model {current_model_name}: {e}")
-            # Re-raise as a generic transient error if it seems like one, otherwise let base class handle
+            # Re-raise as a generic transient error if it seems like one, otherwise let base class's _handle_api_error deal with it
             if isinstance(e, google_exceptions.GoogleAPIError): # Base for many google API errors
-                 raise LLMTransientError(f"Unhandled Google API error: {e}") from e
-            raise # Re-raise other unexpected errors to be caught by BaseLLMClient's _handle_api_error
+                 raise LLMTransientError(f"Unhandled Google API error during text generation: {e}") from e # This will be retried by BaseClient
+            raise # Re-raise other unexpected errors
 
 
-    def _get_embedding_impl(self, text: str, model: str) -> List[float]:
-        # 'model' here is the effective_model determined by the public method
+    def _get_embedding_impl(self, text: str, model: str, current_api_key_for_request: Optional[str]) -> List[float]:
+        # `current_api_key_for_request` is logged by BaseLLMClient.
         current_embedding_model = model
 
         try:
@@ -161,31 +223,34 @@ class GeminiClient(BaseLLMClient):
             # self._log_usage(model_name=current_embedding_model, prompt_tokens=genai.count_tokens(text, model=current_embedding_model).total_tokens)
             # The above count_tokens might not work for embedding models, or might not be relevant.
             # Logging the fact that an embedding was generated is often sufficient here.
-
+            # Token usage for embeddings is harder to get precisely from Gemini SDK in a simple way.
+            # self._log_usage(model_name=current_embedding_model, api_key_used=current_api_key_for_request)
             return embedding_vector
         except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
-            logger.warning(f"Gemini API rate limit hit for embedding model {current_embedding_model}: {e}")
-            raise LLMRateLimitError(f"Gemini API rate limit hit for embedding: {e}") from e
+            logger.warning(f"Gemini API rate limit hit for embedding model {current_embedding_model} (Key: ...{current_api_key_for_request[-4:] if current_api_key_for_request else 'N/A'}): {e}")
+            raise LLMKeyCycleError(f"Gemini API rate limit hit for embedding", failed_key=current_api_key_for_request, original_exception=e) from e
         except (google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.InternalServerError) as e:
-            logger.warning(f"Gemini API service unavailable for embedding model {current_embedding_model}: {e}")
-            raise LLMServiceUnavailableError(f"Gemini API service unavailable for embedding: {e}") from e
-        except google_exceptions.InvalidArgument as e:
+            logger.warning(f"Gemini API service unavailable for embedding model {current_embedding_model} (Key: ...{current_api_key_for_request[-4:] if current_api_key_for_request else 'N/A'}): {e}")
+            raise LLMKeyCycleError(f"Gemini API service unavailable for embedding", failed_key=current_api_key_for_request, original_exception=e) from e
+        except google_exceptions.InvalidArgument as e: # Often due to bad model name or input
             logger.error(f"Gemini API InvalidArgument for embedding model {current_embedding_model}: {e}")
             raise LLMConfigurationError(f"Gemini API InvalidArgument for embedding: {e}") from e
-        except google_exceptions.PermissionDenied as e:
-            logger.error(f"Gemini API Permission Denied for embedding model {current_embedding_model}: {e}")
-            raise LLMAuthenticationError(f"Gemini API Permission Denied for embedding: {e}") from e
-        except Exception as e: # Catch-all for other google_exceptions or unexpected errors
+        except google_exceptions.PermissionDenied as e: # API Key or access issues for this specific key
+            logger.error(f"Gemini API Permission Denied for embedding model {current_embedding_model} (Key: ...{current_api_key_for_request[-4:] if current_api_key_for_request else 'N/A'}): {e}")
+            # This key is bad, trigger cycle. If all keys are bad, retries will exhaust.
+            raise LLMKeyCycleError(f"Gemini API Permission Denied for embedding", failed_key=current_api_key_for_request, original_exception=e) from e
+        except Exception as e:
             logger.error(f"Unexpected Gemini API error during embedding with model {current_embedding_model}: {e}")
             if isinstance(e, google_exceptions.GoogleAPIError):
                  raise LLMTransientError(f"Unhandled Google API error during embedding: {e}") from e
             raise
 
 
-    # def _chat_impl(self, messages: List[Dict[str, str]], temperature: float, max_tokens: Optional[int], model: str) -> Dict:
-    #     # 'model' here is the effective_model determined by the public method
+    # def _chat_impl(self, messages: List[Dict[str, str]], temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> Dict:
+    #     # `current_api_key_for_request` would be passed by the BaseLLMClient's public chat method.
     #     current_model_name = model
-    #     # ... (similar try-except structure as _generate_text_impl, mapping SDK errors to custom LLM errors)
+    #     # ... (similar try-except structure as _generate_text_impl, mapping SDK errors to custom LLM errors,
+    #     #      and raising LLMKeyCycleError for key-specific issues like PermissionDenied or RateLimit)
     #     # Example:
     #     # try:
     #     #     response = active_sdk_model.generate_content(contents=gemini_messages, generation_config=generation_config)

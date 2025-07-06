@@ -16,13 +16,22 @@ default_image_model: "gemini-1.5-flash" # If vision capabilities are used by def
 # to the specific client's constructor.
 
 google_config: # Settings for Google Gemini provider
-  # API key is typically handled by GOOGLE_API_KEY env var, but can be specified here if needed.
-  # api_key: "YOUR_GOOGLE_API_KEY_IF_NOT_IN_ENV"
-  default_text_model: "gemini-1.5-flash" # Default if agent using google doesn't specify model
+  api_keys:
+    - "YOUR_GEMINI_API_KEY_1_FROM_YAML" # Replace with your actual key or use env vars
+    # - "YOUR_GEMINI_API_KEY_2_FROM_YAML"
+    # Add more keys here if needed. Env var GOOGLE_API_KEY can act as a single fallback.
+  default_text_model: "gemini-1.5-flash"
   default_embedding_model: "models/embedding-001"
+  # Retry settings for GeminiClient (can be overridden by BaseLLMClient's defaults if not set)
+  retry_attempts: 3
+  retry_min_wait_seconds: 2
+  retry_max_wait_seconds: 10
+  # Optional: random delay between calls to the same provider (not per key rotation yet)
+  # request_delay_min_seconds: 0.05
+  # request_delay_max_seconds: 0.2
 
 openai_config: # Settings for OpenAI provider (or OpenAI-compatible like Ollama)
-  # api_key: "YOUR_OPENAI_API_KEY_IF_NOT_IN_ENV_OR_OLLAMA_PLACEHOLDER"
+  # api_key: "YOUR_OPENAI_API_KEY_IF_NOT_IN_ENV_OR_OLLAMA_PLACEHOLDER" # Single key for OpenAI for now
   # base_url: null # For official OpenAI. Example for Ollama: "http://localhost:11434/v1"
   default_text_model: "gpt-3.5-turbo"
   default_embedding_model: "text-embedding-3-small"
