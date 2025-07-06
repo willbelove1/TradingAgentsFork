@@ -1,25 +1,47 @@
 import chromadb
 from chromadb.config import Settings
-from openai import OpenAI
-
+import google.generativeai as genai
+import os
 
 class FinancialSituationMemory:
     def __init__(self, name, config):
-        if config["backend_url"] == "http://localhost:11434/v1":
-            self.embedding = "nomic-embed-text"
-        else:
-            self.embedding = "text-embedding-3-small"
-        self.client = OpenAI(base_url=config["backend_url"])
+        self.llm_provider = config.get("llm_provider", "openai").lower()
+        if self.llm_provider == "google":
+            if not os.getenv("GOOGLE_API_KEY"):
+                try:
+                    from dotenv import load_dotenv
+                    load_dotenv()
+                    if not os.getenv("GOOGLE_API_KEY"):
+                        raise ValueError("GOOGLE_API_KEY not found for Google provider in Memory.")
+                except ImportError:
+                    raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in Memory.")
+            genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+            self.embedding_model_name = "models/embedding-001"
+        elif config.get("backend_url") == "http://localhost:11434/v1": # ollama likely
+            self.embedding_model_name = "nomic-embed-text"
+            # Assuming OpenAI client is still used for local/OpenRouter embeddings if not Google
+            from openai import OpenAI
+            self.client = OpenAI(base_url=config["backend_url"])
+        else: # Default to OpenAI
+            self.embedding_model_name = "text-embedding-3-small"
+            from openai import OpenAI
+            self.client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
+
         self.chroma_client = chromadb.Client(Settings(allow_reset=True))
-        self.situation_collection = self.chroma_client.create_collection(name=name)
+        # Ensure collection name is valid for ChromaDB (e.g., no spaces, certain characters)
+        safe_collection_name = name.replace(" ", "_").replace("-", "_")
+        self.situation_collection = self.chroma_client.create_collection(name=safe_collection_name)
 
     def get_embedding(self, text):
-        """Get OpenAI embedding for a text"""
-        
-        response = self.client.embeddings.create(
-            model=self.embedding, input=text
-        )
-        return response.data[0].embedding
+        """Get embedding for a text based on the configured LLM provider."""
+        if self.llm_provider == "google":
+            result = genai.embed_content(model=self.embedding_model_name, content=text)
+            return result['embedding']
+        else: # OpenAI or compatible
+            response = self.client.embeddings.create(
+                model=self.embedding_model_name, input=text
+            )
+            return response.data[0].embedding
 
     def add_situations(self, situations_and_advice):
         """Add financial situations and their corresponding advice. Parameter is a list of tuples (situation, rec)"""

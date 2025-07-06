@@ -12,7 +12,8 @@ import os
 import pandas as pd
 from tqdm import tqdm
 import yfinance as yf
-from openai import OpenAI
+import google.generativeai as genai
+import os
 from .config import get_config, set_config, DATA_DIR
 
 
@@ -702,106 +703,199 @@ def get_YFin_data(
     return filtered_data
 
 
-def get_stock_news_openai(ticker, curr_date):
+def get_stock_news_openai(ticker, curr_date): # Renaming to get_stock_news_llm or similar might be good in future
     config = get_config()
-    client = OpenAI(base_url=config["backend_url"])
+    llm_provider = config.get("llm_provider", "openai").lower()
 
-    response = client.responses.create(
-        model=config["quick_think_llm"],
-        input=[
-            {
-                "role": "system",
-                "content": [
+    if llm_provider == "google":
+        if not os.getenv("GOOGLE_API_KEY"):
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+                if not os.getenv("GOOGLE_API_KEY"):
+                    raise ValueError("GOOGLE_API_KEY not found for Google provider in interface.")
+            except ImportError:
+                raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in interface.")
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        model = genai.GenerativeModel(config["quick_think_llm"])
+        prompt = f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period."
+        # Note: Google's Gemini API doesn't have a direct equivalent to OpenAI's `tools` like `web_search_preview` in the same structured way.
+        # This will be a plain text generation call.
+        # For search capabilities, one would typically integrate a separate search API or use Vertex AI Search.
+        response = model.generate_content(prompt)
+        return response.text
+    else: # OpenAI or compatible
+        from openai import OpenAI # Conditional import
+        client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
+        # The following OpenAI-specific tool usage might not work with all OpenRouter/Ollama models.
+        # It's kept for OpenAI provider.
+        try:
+            response = client.responses.create( # This API seems to be specific to certain OpenAI models or a beta feature.
+                model=config["quick_think_llm"],
+                input=[
                     {
-                        "type": "input_text",
-                        "text": f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period.",
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period.",
+                            }
+                        ],
                     }
                 ],
-            }
-        ],
-        text={"format": {"type": "text"}},
-        reasoning={},
-        tools=[
-            {
-                "type": "web_search_preview",
-                "user_location": {"type": "approximate"},
-                "search_context_size": "low",
-            }
-        ],
-        temperature=1,
-        max_output_tokens=4096,
-        top_p=1,
-        store=True,
-    )
-
-    return response.output[1].content[0].text
-
-
-def get_global_news_openai(curr_date):
-    config = get_config()
-    client = OpenAI(base_url=config["backend_url"])
-
-    response = client.responses.create(
-        model=config["quick_think_llm"],
-        input=[
-            {
-                "role": "system",
-                "content": [
+                text={"format": {"type": "text"}},
+                reasoning={},
+                tools=[
                     {
-                        "type": "input_text",
-                        "text": f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period.",
+                        "type": "web_search_preview",
+                        "user_location": {"type": "approximate"},
+                        "search_context_size": "low",
                     }
                 ],
-            }
-        ],
-        text={"format": {"type": "text"}},
-        reasoning={},
-        tools=[
-            {
-                "type": "web_search_preview",
-                "user_location": {"type": "approximate"},
-                "search_context_size": "low",
-            }
-        ],
-        temperature=1,
-        max_output_tokens=4096,
-        top_p=1,
-        store=True,
-    )
+                temperature=1,
+                max_output_tokens=4096,
+                top_p=1,
+                store=True,
+            )
+            return response.output[1].content[0].text
+        except Exception as e:
+            # Fallback to a standard chat completion if the .responses API fails (e.g. for Ollama)
+            print(f"OpenAI .responses.create failed ({e}), falling back to chat.completions.create for get_stock_news_openai")
+            completion = client.chat.completions.create(
+                model=config["quick_think_llm"],
+                messages=[
+                    {"role": "system", "content": "You are a helpful financial assistant."},
+                    {"role": "user", "content": f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period."}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            return completion.choices[0].message.content
 
-    return response.output[1].content[0].text
 
-
-def get_fundamentals_openai(ticker, curr_date):
+def get_global_news_openai(curr_date): # Renaming to get_global_news_llm or similar might be good in future
     config = get_config()
-    client = OpenAI(base_url=config["backend_url"])
+    llm_provider = config.get("llm_provider", "openai").lower()
 
-    response = client.responses.create(
-        model=config["quick_think_llm"],
-        input=[
-            {
-                "role": "system",
-                "content": [
+    if llm_provider == "google":
+        if not os.getenv("GOOGLE_API_KEY"): # Repeated check, could be refactored
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+                if not os.getenv("GOOGLE_API_KEY"):
+                    raise ValueError("GOOGLE_API_KEY not found for Google provider in interface.")
+            except ImportError:
+                raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in interface.")
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        model = genai.GenerativeModel(config["quick_think_llm"])
+        prompt = f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period."
+        response = model.generate_content(prompt)
+        return response.text
+    else: # OpenAI or compatible
+        from openai import OpenAI # Conditional import
+        client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
+        try:
+            response = client.responses.create(
+                model=config["quick_think_llm"],
+                input=[
                     {
-                        "type": "input_text",
-                        "text": f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc",
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period.",
+                            }
+                        ],
                     }
                 ],
-            }
-        ],
-        text={"format": {"type": "text"}},
-        reasoning={},
-        tools=[
-            {
-                "type": "web_search_preview",
-                "user_location": {"type": "approximate"},
-                "search_context_size": "low",
-            }
-        ],
-        temperature=1,
-        max_output_tokens=4096,
-        top_p=1,
-        store=True,
-    )
+                text={"format": {"type": "text"}},
+                reasoning={},
+                tools=[
+                    {
+                        "type": "web_search_preview",
+                        "user_location": {"type": "approximate"},
+                        "search_context_size": "low",
+                    }
+                ],
+                temperature=1,
+                max_output_tokens=4096,
+                top_p=1,
+                store=True,
+            )
+            return response.output[1].content[0].text
+        except Exception as e:
+            print(f"OpenAI .responses.create failed ({e}), falling back to chat.completions.create for get_global_news_openai")
+            completion = client.chat.completions.create(
+                model=config["quick_think_llm"],
+                messages=[
+                    {"role": "system", "content": "You are a helpful financial assistant."},
+                    {"role": "user", "content": f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period."}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            return completion.choices[0].message.content
 
-    return response.output[1].content[0].text
+
+def get_fundamentals_openai(ticker, curr_date): # Renaming to get_fundamentals_llm or similar might be good in future
+    config = get_config()
+    llm_provider = config.get("llm_provider", "openai").lower()
+
+    if llm_provider == "google":
+        if not os.getenv("GOOGLE_API_KEY"): # Repeated check
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+                if not os.getenv("GOOGLE_API_KEY"):
+                    raise ValueError("GOOGLE_API_KEY not found for Google provider in interface.")
+            except ImportError:
+                raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in interface.")
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        model = genai.GenerativeModel(config["quick_think_llm"])
+        prompt = f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc"
+        response = model.generate_content(prompt)
+        return response.text
+    else: # OpenAI or compatible
+        from openai import OpenAI # Conditional import
+        client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
+        try:
+            response = client.responses.create(
+                model=config["quick_think_llm"],
+                input=[
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc",
+                            }
+                        ],
+                    }
+                ],
+                text={"format": {"type": "text"}},
+                reasoning={},
+                tools=[
+                    {
+                        "type": "web_search_preview",
+                        "user_location": {"type": "approximate"},
+                        "search_context_size": "low",
+                    }
+                ],
+                temperature=1,
+                max_output_tokens=4096,
+                top_p=1,
+                store=True,
+            )
+            return response.output[1].content[0].text
+        except Exception as e:
+            print(f"OpenAI .responses.create failed ({e}), falling back to chat.completions.create for get_fundamentals_openai")
+            completion = client.chat.completions.create(
+                model=config["quick_think_llm"],
+                messages=[
+                    {"role": "system", "content": "You are a helpful financial assistant."},
+                    {"role": "user", "content": f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc"}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            return completion.choices[0].message.content
