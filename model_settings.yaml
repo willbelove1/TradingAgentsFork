@@ -1,118 +1,122 @@
 # Configuration for LLM provider and specific models for agents/components
 
-# Overall LLM provider ("google", "openai", "anthropic", etc.)
-# This will determine which client (GeminiClient, OpenAIClient) is primarily used.
+# --- Default Top-Level LLM Provider ---
+# This provider will be used if an agent/component doesn't specify its own.
 llm_provider: "google"
 
-# --- Default model names for the selected provider ---
-# These are used if a specific model is not defined for an agent/component below.
-# For Google (Gemini):
-default_text_model: "gemini-1.5-flash" # Fast and capable for general tasks
+# --- Default model names for the TOP-LEVEL llm_provider ---
+# (e.g., if llm_provider is "google", these are Gemini models)
+default_text_model: "gemini-1.5-flash"
 default_embedding_model: "models/embedding-001"
-default_image_model: "gemini-1.5-flash" # For potential vision capabilities
+default_image_model: "gemini-1.5-flash" # If vision capabilities are used by default provider
 
-# For OpenAI:
-# default_text_model: "gpt-3.5-turbo"
-# default_embedding_model: "text-embedding-3-small"
-# default_image_model: "gpt-4-vision-preview"
+# --- Provider-Specific Configurations ---
+# Contains settings unique to each provider that might be used by their clients.
+# The BaseLLMClient factory (get_llm_client) will pass the relevant sub-config
+# to the specific client's constructor.
 
-# --- OpenAI Specific Configuration (for OpenAI provider or OpenAI-compatible servers like Ollama) ---
-# If llm_provider is "openai" and these are set, they will be used by OpenAIClient.
-# For official OpenAI, keep these null or comment out.
-openai_base_url: null # Example for Ollama: "http://localhost:11434/v1"
-openai_api_key: null  # Example for Ollama: "ollama" (or any string, as Ollama doesn't usually require a key)
+google_config: # Settings for Google Gemini provider
+  # API key is typically handled by GOOGLE_API_KEY env var, but can be specified here if needed.
+  # api_key: "YOUR_GOOGLE_API_KEY_IF_NOT_IN_ENV"
+  default_text_model: "gemini-1.5-flash" # Default if agent using google doesn't specify model
+  default_embedding_model: "models/embedding-001"
+
+openai_config: # Settings for OpenAI provider (or OpenAI-compatible like Ollama)
+  # api_key: "YOUR_OPENAI_API_KEY_IF_NOT_IN_ENV_OR_OLLAMA_PLACEHOLDER"
+  # base_url: null # For official OpenAI. Example for Ollama: "http://localhost:11434/v1"
+  default_text_model: "gpt-3.5-turbo"
+  default_embedding_model: "text-embedding-3-small"
+
+# anthropic_config: # Example for Anthropic
+#   api_key: "YOUR_ANTHROPIC_API_KEY_IF_NOT_IN_ENV"
+#   default_text_model: "claude-3-haiku-20240307"
+
+
+# --- Langchain ChatModel Instances Configuration ---
+# These define specific ChatModel instances that Langchain-based agents can reference.
+# Each instance specifies its provider and model_name.
+# TradingAgentsGraph will create these instances and GraphSetup will assign them.
+langchain_chat_models:
+  # Google Gemini Instances
+  quick_google_lc: { provider: "google", model_name: "gemini-1.5-flash" }
+  deep_google_lc:  { provider: "google", model_name: "gemini-1.0-pro" } # More robust for deep thinking
+
+  # OpenAI Instances
+  quick_openai_lc: { provider: "openai", model_name: "gpt-3.5-turbo" } # Assumes 'openai_config' above is set if not OpenAI official
+  deep_openai_lc:  { provider: "openai", model_name: "gpt-4" }         # Assumes 'openai_config'
+
+  # Example for a local Ollama model via OpenAI provider config
+  # quick_ollama_lc: { provider: "openai", model_name: "llama2:7b-chat" } # 'openai_config.base_url' must be set to Ollama
+
 
 # --- Agent/Component Specific Model Configurations ---
-# Allows overriding the default models and setting other generation parameters.
-
-# These keys will be used in TradingAgentsGraph to instantiate the correct Langchain ChatModels
-# The actual model names for these keys are defined below under 'langchain_chat_models'
-langchain_quick_thinker_key: "quick_llm_lc"
-langchain_deep_thinker_key: "deep_llm_lc"
-
-# Define the actual models for the Langchain ChatModel instances
-# These names should match valid model names for the chosen llm_provider
-langchain_chat_models:
-  quick_llm_lc: # Name for the "quick thinker" Langchain ChatModel instance
-    # For Google:
-    model_name: "gemini-1.5-flash"
-    # For OpenAI:
-    # model_name: "gpt-3.5-turbo"
-  deep_llm_lc: # Name for the "deep thinker" Langchain ChatModel instance
-    # For Google:
-    model_name: "gemini-1.0-pro" # More robust model for deeper analysis
-    # For OpenAI:
-    # model_name: "gpt-4"
-
-
 agent_model_configs:
-  # Langchain-based Agents - they will use one of the ChatModel instances defined above.
-  # The 'llm_instance_key' refers to a key in 'langchain_chat_models'.
+  # Langchain-based Agents:
+  # They use 'llm_instance_key' to refer to one of the instances defined in 'langchain_chat_models'.
+  # The 'llm_provider' here is mostly for clarity/documentation as the instance_key already defines it.
   MarketAnalyst:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google" # This agent will use a Google model
+    llm_instance_key: "quick_google_lc"
   SocialMediaAnalyst:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
   NewsAnalyst:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "openai" # This agent will use an OpenAI model
+    llm_instance_key: "quick_openai_lc"
   FundamentalsAnalyst:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
 
   BullResearcher:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
   BearResearcher:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
   ResearchManager: # Judge for research debate
-    llm_instance_key: "deep_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "deep_google_lc" # Uses a "deeper" Google model
 
   Trader:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "openai"
+    llm_instance_key: "quick_openai_lc"
 
   RiskyDebator:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
   NeutralDebator:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
   SafeDebator:
-    llm_instance_key: "quick_llm_lc"
+    llm_provider: "google"
+    llm_instance_key: "quick_google_lc"
   RiskManager: # Judge for risk debate
-    llm_instance_key: "deep_llm_lc"
+    llm_provider: "openai"
+    llm_instance_key: "deep_openai_lc" # Uses a "deeper" OpenAI model
 
-  # Components using BaseLLMClient directly
-  # These can specify model name and generation parameters directly.
-  # If 'model' is not specified, the 'default_text_model' for the provider will be used.
+  # Components using BaseLLMClient directly:
+  # These can specify their llm_provider and model directly.
+  # If llm_provider is omitted, the top-level default is used.
+  # If model is omitted, the provider's default_text_model (from google_config, openai_config etc.) is used.
   Reflector:
-    model: "gemini-1.0-pro" # Using a more robust model for reflection tasks
+    llm_provider: "google"
+    model: "gemini-1.0-pro"
     temperature: 0.6
     max_tokens: 2048
   SignalProcessor:
-    model: "gemini-1.5-flash" # Fast model for simple extraction
+    llm_provider: "openai"
+    model: "gpt-3.5-turbo" # Or a very small, fast model if available
     temperature: 0.1
-    max_tokens: 25 # Slightly increased for safety, expecting BUY/SELL/HOLD
+    max_tokens: 25
 
   FinancialSituationMemory:
-    # This component primarily uses embeddings. The embedding model is taken from
-    # 'default_embedding_model' or can be overridden in the BaseLLMClient's config.
-    # If an override is needed specifically for this component, it could be:
-    embedding_model_override: null # Example: "models/embedding-custom"
-    # No text generation parameters needed unless it starts generating text.
+    # Uses embeddings. The embedding model is determined by the llm_provider's default_embedding_model.
+    # If this component needs a specific provider for embeddings:
+    llm_provider: "google"
+    # embedding_model_override: "custom-embedding-model-for-memory" # If needed
 
   InterfaceFunctions: # For LLM calls made directly from dataflows/interface.py
-    model: "gemini-1.5-flash" # Fast model for news summarization etc.
+    llm_provider: "google"
+    model: "gemini-1.5-flash"
     temperature: 0.7
     max_tokens: 1024
-
-# --- Round Styles (Conceptual for now) ---
-# "Quick" vs "Slow" round styles will primarily be implemented by choosing
-# different models (e.g., Flash vs Pro/Ultra) for agents involved in those rounds,
-# as configured above in `agent_model_configs`.
-# Additional parameters like prompt variations or iteration depth for debates
-# could be added here in the future if needed.
-# Example:
-# research_debate_config:
-#   quick_round_model: "gemini-1.5-flash"
-#   slow_round_model: "gemini-1.0-pro"
-#   iteration_depth: 3
-# risk_discussion_config:
-#   default_model: "gemini-1.0-pro"
-
-# This file should be placed in the root directory or a dedicated 'config/' directory.
-# Ensure PyYAML is installed to parse this file.
