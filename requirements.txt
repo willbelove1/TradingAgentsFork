@@ -29,3 +29,4 @@ PyYAML
 pytest
 pytest-mock
 streamlit
+tenacity

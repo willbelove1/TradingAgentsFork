@@ -6,9 +6,13 @@ from typing import List, Dict, Optional
 
 from tradingagents.llm_clients.base_client import BaseLLMClient, logger # Use the logger from base
 
-# It's good practice to ensure API key is configured when the module is used.
-# However, the actual configuration call (genai.configure) should happen
-# ideally once, and can be triggered by the client's __init__.
+import google.api_core.exceptions as google_exceptions # For specific exception types
+
+from tradingagents.llm_clients.base_client import (
+    BaseLLMClient, logger,
+    LLMTransientError, LLMRateLimitError, LLMServiceUnavailableError,
+    LLMAuthenticationError, LLMConfigurationError, LLMResponseError
+)
 
 class GeminiClient(BaseLLMClient):
     """
@@ -64,22 +68,9 @@ class GeminiClient(BaseLLMClient):
 
         logger.info(f"GeminiClient initialized. Default text model: {self.model_name}, Default embedding model: {self.embedding_model_name}")
 
-    def generate_text(self, prompt: str, temperature: float = 0.7, max_tokens: Optional[int] = None, model: Optional[str] = None) -> str:
-        """
-        Generates text using the Gemini model.
-        Args:
-            prompt (str): The input prompt.
-            temperature (float): Controls randomness.
-            max_tokens (int, optional): Maximum number of tokens for the output.
-                                       Note: Gemini API uses 'max_output_tokens'.
-            model (str, optional): Specific model name to override the default.
-        Returns:
-            str: The generated text.
-        """
-        # Call super for logging start time
-        super().generate_text(prompt, temperature, max_tokens, model)
-
-        current_model_name = model or self.model_name
+    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str) -> str:
+        # 'model' here is the effective_model determined by the public method
+        current_model_name = model
 
         generation_config = genai.types.GenerationConfig(
             temperature=temperature
@@ -104,42 +95,54 @@ class GeminiClient(BaseLLMClient):
             response = active_sdk_model.generate_content(
                 prompt,
                 generation_config=generation_config,
-                # safety_settings=safety_settings
+        # safety_settings=safety_settings
             )
 
-            generated_text = response.text
+            if not response.candidates:
+                # This can happen if all candidates were filtered by safety settings or other reasons
+                logger.warning(f"Gemini model {current_model_name} returned no candidates. Prompt: '{prompt[:100]}...'")
+                # Check for prompt feedback if available
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                    reason = response.prompt_feedback.block_reason.name
+                    logger.error(f"Prompt blocked for model {current_model_name} due to: {reason}")
+                    raise LLMResponseError(f"Prompt blocked by Gemini safety filters: {reason}")
+                raise LLMResponseError(f"No candidates returned from Gemini model {current_model_name}.")
 
-            # Token counting for Gemini is not directly available in the same way as OpenAI's response object.
-            # genai.count_tokens(contents=prompt, model=current_model_name) can give prompt tokens.
-            # Response tokens are harder to get directly without parsing or if not provided by future API updates.
-            # For now, we'll log what we can.
+            generated_text = response.text # Accessing .text might raise if no valid candidate
+
             try:
                 prompt_token_count = active_sdk_model.count_tokens(prompt).total_tokens
-                # response_token_count = active_sdk_model.count_tokens(generated_text).total_tokens # This would count tokens of the *generated* text
-                # total_tokens = prompt_token_count + response_token_count
-                self._log_usage(model_name=current_model_name, prompt_tokens=prompt_token_count) #, completion_tokens=response_token_count)
-            except Exception as token_count_error:
+                self._log_usage(model_name=current_model_name, prompt_tokens=prompt_token_count)
+            except Exception as token_count_error: # pragma: no cover
                 logger.warning(f"Could not count tokens for Gemini model {current_model_name}: {token_count_error}")
 
             return generated_text
-        except Exception as e:
-            logger.error(f"Gemini API error during text generation with model {current_model_name}: {e}")
-            self._handle_api_error(e) # This will re-raise
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            logger.warning(f"Gemini API rate limit hit for model {current_model_name}: {e}")
+            raise LLMRateLimitError(f"Gemini API rate limit hit: {e}") from e
+        except (google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.InternalServerError) as e:
+            logger.warning(f"Gemini API service unavailable for model {current_model_name}: {e}")
+            raise LLMServiceUnavailableError(f"Gemini API service unavailable: {e}") from e
+        except google_exceptions.InvalidArgument as e: # Often due to bad prompt/content or model name
+            logger.error(f"Gemini API InvalidArgument for model {current_model_name} (check prompt or model name): {e}")
+            raise LLMConfigurationError(f"Gemini API InvalidArgument (check prompt or model name): {e}") from e
+        except google_exceptions.PermissionDenied as e: # API Key or access issues
+            logger.error(f"Gemini API Permission Denied for model {current_model_name}: {e}")
+            raise LLMAuthenticationError(f"Gemini API Permission Denied: {e}") from e
+        except genai.types.generation_types.StopCandidateException as e: # Safety filter related
+            logger.error(f"Gemini content generation stopped (safety/policy) for model {current_model_name}: {e}")
+            raise LLMResponseError(f"Gemini content generation stopped (safety/policy): {e}") from e
+        except Exception as e: # Catch-all for other google_exceptions or unexpected errors
+            logger.error(f"Unexpected Gemini API error during text generation with model {current_model_name}: {e}")
+            # Re-raise as a generic transient error if it seems like one, otherwise let base class handle
+            if isinstance(e, google_exceptions.GoogleAPIError): # Base for many google API errors
+                 raise LLMTransientError(f"Unhandled Google API error: {e}") from e
+            raise # Re-raise other unexpected errors to be caught by BaseLLMClient's _handle_api_error
 
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
-        """
-        Generates an embedding for a given text using Gemini embedding models.
-        Args:
-            text (str): The input text to embed.
-            model (str, optional): Specific embedding model name to override the default.
-                                   e.g., 'models/embedding-001' or 'models/text-embedding-004'.
-        Returns:
-            List[float]: The embedding vector.
-        """
-        # Call super for logging start time
-        super().get_embedding(text, model)
 
-        current_embedding_model = model or self.embedding_model_name
+    def _get_embedding_impl(self, text: str, model: str) -> List[float]:
+        # 'model' here is the effective_model determined by the public method
+        current_embedding_model = model
 
         try:
             # For embeddings, the model name is passed directly.
@@ -160,9 +163,43 @@ class GeminiClient(BaseLLMClient):
             # Logging the fact that an embedding was generated is often sufficient here.
 
             return embedding_vector
-        except Exception as e:
-            logger.error(f"Gemini API error during embedding generation with model {current_embedding_model}: {e}")
-            self._handle_api_error(e) # This will re-raise
+        except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+            logger.warning(f"Gemini API rate limit hit for embedding model {current_embedding_model}: {e}")
+            raise LLMRateLimitError(f"Gemini API rate limit hit for embedding: {e}") from e
+        except (google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.InternalServerError) as e:
+            logger.warning(f"Gemini API service unavailable for embedding model {current_embedding_model}: {e}")
+            raise LLMServiceUnavailableError(f"Gemini API service unavailable for embedding: {e}") from e
+        except google_exceptions.InvalidArgument as e:
+            logger.error(f"Gemini API InvalidArgument for embedding model {current_embedding_model}: {e}")
+            raise LLMConfigurationError(f"Gemini API InvalidArgument for embedding: {e}") from e
+        except google_exceptions.PermissionDenied as e:
+            logger.error(f"Gemini API Permission Denied for embedding model {current_embedding_model}: {e}")
+            raise LLMAuthenticationError(f"Gemini API Permission Denied for embedding: {e}") from e
+        except Exception as e: # Catch-all for other google_exceptions or unexpected errors
+            logger.error(f"Unexpected Gemini API error during embedding with model {current_embedding_model}: {e}")
+            if isinstance(e, google_exceptions.GoogleAPIError):
+                 raise LLMTransientError(f"Unhandled Google API error during embedding: {e}") from e
+            raise
+
+
+    # def _chat_impl(self, messages: List[Dict[str, str]], temperature: float, max_tokens: Optional[int], model: str) -> Dict:
+    #     # 'model' here is the effective_model determined by the public method
+    #     current_model_name = model
+    #     # ... (similar try-except structure as _generate_text_impl, mapping SDK errors to custom LLM errors)
+    #     # Example:
+    #     # try:
+    #     #     response = active_sdk_model.generate_content(contents=gemini_messages, generation_config=generation_config)
+    #     #     # ... process response ...
+    #     #     return {"role": "assistant", "content": assistant_response_content}
+    #     # except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as e:
+    #     #     raise LLMRateLimitError(f"Gemini API rate limit hit during chat: {e}") from e
+    #     # ... other specific exceptions ...
+    #     # except Exception as e:
+    #     #     logger.error(f"Unexpected Gemini API error during chat with model {current_model_name}: {e}")
+    #     #     if isinstance(e, google_exceptions.GoogleAPIError):
+    #     #          raise LLMTransientError(f"Unhandled Google API error during chat: {e}") from e
+    #     #     raise
+    #     return {} # Placeholder
 
     # def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: Optional[int] = None, model: Optional[str] = None) -> Dict:
     #     """
