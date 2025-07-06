@@ -119,9 +119,10 @@ You will also need the FinnHub API for financial data. All of our code is implem
 export FINNHUB_API_KEY=$YOUR_FINNHUB_API_KEY
 ```
 
-You will need the OpenAI API for all the agents.
+You will need the Google AI API (for Gemini models) for all the agents. Ensure your API key is set up.
 ```bash
-export OPENAI_API_KEY=$YOUR_OPENAI_API_KEY
+export GOOGLE_API_KEY=$YOUR_GEMINI_API_KEY
+# Or ensure it's in your .env file or model_settings.yaml under google_config.api_keys
 ```
 
 ### CLI Usage
@@ -150,11 +151,11 @@ An interface will appear showing results as they load, letting you track the age
 
 ### Implementation Details
 
-We built TradingAgents with LangGraph to ensure flexibility and modularity. We utilize `o1-preview` and `gpt-4o` as our deep thinking and fast thinking LLMs for our experiments. However, for testing purposes, we recommend you use `o4-mini` and `gpt-4.1-mini` to save on costs as our framework makes **lots of** API calls.
+We built TradingAgents with LangGraph to ensure flexibility and modularity. This fork is configured to primarily use Google's Gemini models, for example, `gemini-1.0-pro` for deep thinking tasks and `gemini-1.5-flash` for fast thinking tasks, as defined in `model_settings.yaml`. Our framework makes **lots of** API calls, so be mindful of your quotas and configure API key cycling if using multiple keys.
 
 ### Python Usage
 
-To use TradingAgents inside your code, you can import the `tradingagents` module and initialize a `TradingAgentsGraph()` object. The `.propagate()` function will return a decision. You can run `main.py`, here's also a quick example:
+To use TradingAgents inside your code, you can import the `tradingagents` module and initialize a `TradingAgentsGraph()` object. The `.propagate()` function will return a decision. Ensure your `model_settings.yaml` is configured correctly. You can run `main.py`, here's also a quick example:
 
 ```python
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -173,15 +174,28 @@ You can also adjust the default configuration to set your own choice of LLMs, de
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
-# Create a custom config
-config = DEFAULT_CONFIG.copy()
-config["deep_think_llm"] = "gpt-4.1-nano"  # Use a different model
-config["quick_think_llm"] = "gpt-4.1-nano"  # Use a different model
-config["max_debate_rounds"] = 1  # Increase debate rounds
+# Create a custom config (though modifying model_settings.yaml is preferred for model choices)
+config = DEFAULT_CONFIG.copy() # This will load defaults and merge model_settings.yaml if found by initialize_config()
+
+# To change models programmatically (after initial load, before graph init):
+# 1. Modify the global config that TradingAgentsGraph will use:
+# from tradingagents.dataflows.config import set_config, get_config, initialize_config
+# initialize_config() # Ensure defaults and model_settings.yaml are loaded
+# current_cfg = get_config()
+# current_cfg['langchain_chat_models']['deep_google_lc']['model_name'] = "gemini-1.5-pro"
+# current_cfg['langchain_chat_models']['quick_google_lc']['model_name'] = "gemini-1.5-flash" # Ensure this key exists
+# set_config(current_cfg) # Update global config
+
+# Or, if passing a config object directly to TradingAgentsGraph (less common now):
+# config["langchain_chat_models"]["deep_google_lc"]["model_name"] = "gemini-1.5-pro"
+# config["langchain_chat_models"]["quick_google_lc"]["model_name"] = "gemini-1.5-flash"
+
+config["max_debate_rounds"] = 1  # Adjust debate rounds
 config["online_tools"] = True # Use online tools or cached data
 
-# Initialize with custom config
-ta = TradingAgentsGraph(debug=True, config=config)
+# Initialize with custom config (or it will use the globally set one)
+# If config is passed, it's used directly. If not, get_config() is used by the graph.
+ta = TradingAgentsGraph(debug=True, config=config) # Pass the modified config
 
 # forward propagate
 _, decision = ta.propagate("NVDA", "2024-05-10")

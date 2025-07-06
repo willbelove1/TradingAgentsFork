@@ -74,3 +74,11 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+
+    # Fields for Trader-ResearchManager consultation
+    tr_consultation_active: Annotated[bool, "Is a consultation between Trader and ResearchManager active?"] = False # Default to False
+    tr_clarification_request: Annotated[Optional[str], "Trader's request for clarification to ResearchManager"] = None
+    tr_clarification_response: Annotated[Optional[str], "ResearchManager's response to clarification"] = None
+    tr_consultation_round: Annotated[int, "Current consultation round for Trader-ResearchManager"] = 0
+    # max_tr_consultation_rounds will be sourced from config at runtime
+    initial_investment_plan_for_consultation: Annotated[Optional[str], "The initial plan from RM that Trader wants to clarify"] = None

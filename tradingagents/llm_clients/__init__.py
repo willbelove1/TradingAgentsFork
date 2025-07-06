@@ -3,7 +3,7 @@ from typing import Dict, Optional
 
 from .base_client import BaseLLMClient
 from .gemini_client import GeminiClient
-from .openai_client import OpenAIClient
+# from .openai_client import OpenAIClient # Removed
 # Import other clients here if you add them, e.g.:
 # from .anthropic_client import AnthropicClient
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_PROVIDERS = {
     "gemini": GeminiClient,
     "google": GeminiClient, # Alias for gemini
-    "openai": OpenAIClient,
+    # "openai": OpenAIClient, # Removed
     # "anthropic": AnthropicClient,
 }
 

@@ -21,10 +21,10 @@ except ImportError as e:
         def propagate(self, *args, **kwargs):
             yield {"messages": ["TradingAgentsGraph not loaded due to import error."]}
             return {}, "ERROR"
-    SUPPORTED_PROVIDERS = {"google": None, "openai": None} # Placeholder
+    SUPPORTED_PROVIDERS = {"google": None} # Placeholder, ensure only google related
 
 # --- App Configuration ---
-st.set_page_config(layout="wide", page_title="TradingAgents Dashboard")
+st.set_page_config(layout="wide", page_title="TradingAgents Dashboard (Gemini Edition)")
 
 # --- Logging & State ---
 if 'app_logs' not in st.session_state:
@@ -175,23 +175,57 @@ def get_llm_provider_choices_dashboard(app_config: Dict) -> List[str]:
     lc_models_cfg = app_config.get('langchain_chat_models', {})
     for lc_model_def in lc_models_cfg.values():
         if isinstance(lc_model_def, dict) and 'provider' in lc_model_def: providers.add(lc_model_def['provider'].lower())
-    return sorted(list(providers)) if providers else ["google", "openai"]
+
+    lc_models_cfg = app_config.get('langchain_chat_models', {})
+    for lc_model_def in lc_models_cfg.values():
+        if isinstance(lc_model_def, dict) and 'provider' in lc_model_def:
+            # Only add if it's a Gemini provider
+            if lc_model_def['provider'].lower() in ["google", "gemini"]:
+                providers.add(lc_model_def['provider'].lower())
+
+    # Ensure only "google" or its aliases (like "gemini") are returned.
+    # Since SUPPORTED_PROVIDERS in llm_clients should now only contain Gemini related entries.
+    from tradingagents.llm_clients import SUPPORTED_PROVIDERS as ACTUAL_SUPPORTED_PROVIDERS
+
+    # Filter by what's actually supported in the backend llm_clients
+    # This ensures UI doesn't offer providers for which no client exists.
+    final_provider_options = [p for p in providers if p in ACTUAL_SUPPORTED_PROVIDERS]
+
+    # If, after filtering, list is empty, or if original 'providers' set was empty, default to "google".
+    if not final_provider_options:
+        # Check if 'google' is even in supported providers (it should be for Gemini-only fork)
+        if "google" in ACTUAL_SUPPORTED_PROVIDERS or "gemini" in ACTUAL_SUPPORTED_PROVIDERS:
+            final_provider_options = ["google"] # Default to google if it's supported
+        else: # Should not happen in a correctly configured Gemini-only fork
+            final_provider_options = list(ACTUAL_SUPPORTED_PROVIDERS.keys()) # Or just empty / error
+            if not final_provider_options: final_provider_options = ["google"] # Absolute fallback
+
+    return sorted(list(set(final_provider_options))) # Use set to ensure uniqueness
+
 
 def get_model_choices_for_provider_dashboard(provider_name: str, app_config: Dict, role: str = "any") -> List[str]:
     models = set()
-    provider_name = provider_name.lower()
-    provider_specific_cfg = app_config.get(f"{provider_name}_config", {})
+    # This fork is Gemini-only, so provider_name should always be 'google' or 'gemini'.
+    # If not, we default to providing Gemini model list.
+    provider_name_lower = "google" if provider_name.lower() not in ["google", "gemini"] else provider_name.lower()
+
+
+    provider_specific_cfg = app_config.get(f"{provider_name}_config", {}) # Should be google_config
     default_model_for_provider = provider_specific_cfg.get("default_text_model")
     if not default_model_for_provider and provider_name == app_config.get("llm_provider","").lower():
         default_model_for_provider = app_config.get("default_text_model")
     if default_model_for_provider: models.add(default_model_for_provider)
+
     lc_models_cfg = app_config.get('langchain_chat_models', {})
     for lc_model_def in lc_models_cfg.values():
         if isinstance(lc_model_def, dict) and lc_model_def.get('provider', '').lower() == provider_name and lc_model_def.get('model_name'):
             models.add(lc_model_def['model_name'])
-    if provider_name == "google": models.update(["gemini-1.5-flash", "gemini-1.0-pro", "gemini-1.5-pro"])
-    elif provider_name == "openai": models.update(["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o"])
-    return sorted(list(models)) if models else ["default-model-if-not-found"]
+
+    # Add well-known Gemini models
+    models.update(["gemini-1.5-flash", "gemini-1.0-pro", "gemini-1.5-pro"])
+    # elif provider_name == "openai": models.update(["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o"]) # REMOVED
+
+    return sorted(list(models)) if models else ["gemini-1.5-flash"] # Fallback for Gemini
 
 
 # --- Sidebar for Inputs (largely same as before) ---

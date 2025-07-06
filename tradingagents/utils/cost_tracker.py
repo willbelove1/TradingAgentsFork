@@ -229,7 +229,7 @@ if __name__ == '__main__':
             f"{yesterday},google,...key1,MarketAnalyst,gemini-1.5-flash,100,200,300,1.5,0.0005,True\n",
             f"{today},google,...key1,NewsAnalyst,gemini-1.5-flash,150,300,450,2.1,0.0007,True\n",
             f"{today},google,...key1,MarketAnalyst,gemini-1.0-pro,200,500,700,3.0,0.0015,True\n",
-            f"{today},openai,...keyX,Trader,gpt-3.5-turbo,50,100,150,0.8,0.0001,True\n",
+            # f"{today},openai,...keyX,Trader,gpt-3.5-turbo,50,100,150,0.8,0.0001,True\n", # Removed OpenAI dummy data
             f"{today},google,...key2,Reflector,gemini-1.0-pro,300,600,900,4.5,0.0025,False\n", # Failed request
         ]
         with open(dummy_csv_path, 'w', encoding='utf-8') as f:

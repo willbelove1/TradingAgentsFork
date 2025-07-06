@@ -48,7 +48,7 @@ class LLMKeyCycleError(LLMTransientError):
 
 # --- Default Retry Configuration ---
 DEFAULT_RETRY_EXCEPTIONS: Tuple[type[Exception], ...] = (
-    LLMTransientError, # Includes RateLimit, ServiceUnavailable, and KeyCycleError by inheritance
+    LLMTransientError,
 )
 
 def log_retry_attempt(retry_state: Any) -> None:
@@ -56,7 +56,9 @@ def log_retry_attempt(retry_state: Any) -> None:
     exc_info = retry_state.outcome.exception()
     failed_key_info = ""
     if isinstance(exc_info, LLMKeyCycleError) and exc_info.failed_key:
-        failed_key_info = f" (Key: {exc_info.failed_key})"
+        # Only show last 4 chars of key for security, if key is long enough
+        key_display = f"...{exc_info.failed_key[-4:]}" if len(exc_info.failed_key) > 4 else exc_info.failed_key
+        failed_key_info = f" (Key: {key_display})"
 
     logger.warning(
         f"Retrying LLM API call: {retry_state.fn.__name__ if retry_state.fn else 'N/A'}{failed_key_info} "
@@ -66,127 +68,98 @@ def log_retry_attempt(retry_state: Any) -> None:
     )
 
 class BaseLLMClient(abc.ABC):
-    """
-    Abstract base class for LLM clients with built-in retry logic.
-    Defines a standardized interface for interacting with different LLM providers.
-    """
-
     DEFAULT_RETRY_ATTEMPTS = 3
     DEFAULT_RETRY_MIN_WAIT_SECONDS = 2
     DEFAULT_RETRY_MAX_WAIT_SECONDS = 10
 
     def __init__(self, api_key: Optional[str] = None, config: Optional[Dict] = None):
-        self.api_key = api_key # For single API key clients. Multi-key clients will handle keys differently.
+        self.api_key = api_key
         self.config = config if config else {}
 
-        # Default models for this client instance
         self.model_name = self.config.get("model") or self.config.get("default_text_model")
         self.embedding_model_name = self.config.get("embedding_model") or self.config.get("default_embedding_model")
 
-        # Retry settings for this client instance
         self.retry_attempts = self.config.get("retry_attempts", self.DEFAULT_RETRY_ATTEMPTS)
         self.retry_min_wait = self.config.get("retry_min_wait_seconds", self.DEFAULT_RETRY_MIN_WAIT_SECONDS)
         self.retry_max_wait = self.config.get("retry_max_wait_seconds", self.DEFAULT_RETRY_MAX_WAIT_SECONDS)
 
-        # Log warnings if default models are not found, as they are often essential.
-        if not self.model_name and self.__class__._generate_text_impl != BaseLLMClient._generate_text_impl: # only if subclass implements it
+        if not self.model_name and hasattr(self.__class__, '_generate_text_impl') and self.__class__._generate_text_impl != BaseLLMClient._generate_text_impl:
             logger.warning(f"{self.__class__.__name__}: Default text model ('model' or 'default_text_model') not found in config.")
-        if not self.embedding_model_name and self.__class__._get_embedding_impl != BaseLLMClient._get_embedding_impl: # only if subclass implements it
+        if not self.embedding_model_name and hasattr(self.__class__, '_get_embedding_impl') and self.__class__._get_embedding_impl != BaseLLMClient._get_embedding_impl:
             logger.debug(f"{self.__class__.__name__}: Default embedding model ('embedding_model' or 'default_embedding_model') not found in config.")
 
     @abc.abstractmethod
-    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> str:
+    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str], agent_name: Optional[str]) -> str:
         pass
 
     @abc.abstractmethod
-    def _get_embedding_impl(self, text: str, model: str, current_api_key_for_request: Optional[str]) -> List[float]:
+    def _get_embedding_impl(self, text: str, model: str, current_api_key_for_request: Optional[str], agent_name: Optional[str]) -> List[float]:
         pass
 
-    # @abc.abstractmethod
-    # def _chat_impl(self, messages: List[Dict[str, str]], temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> Dict:
-    #    pass
-
     def _get_retry_decorator(self) -> Any:
-        """Constructs a tenacity retry decorator based on client's retry settings."""
         return retry(
             stop=stop_after_attempt(self.retry_attempts),
             wait=wait_exponential(multiplier=1, min=self.retry_min_wait, max=self.retry_max_wait),
             retry=retry_if_exception_type(DEFAULT_RETRY_EXCEPTIONS),
             before_sleep=log_retry_attempt,
-            reraise=True # Re-raise the last exception if all retries fail
+            reraise=True
         )
 
-import csv
-import datetime
-import os
-from tradingagents.config.pricing_loader import load_llm_pricing, get_model_cost
-
-
     def _get_current_api_key_for_request(self) -> Optional[str]:
-        """
-        Placeholder for subclasses (like multi-key clients) to override.
-        Base implementation returns the single self.api_key.
-        Multi-key clients will implement cycling logic here.
-        This key is primarily for logging and for SDK configuration if needed per call.
-        """
-        # For single-key clients, self.api_key might come from direct init, config, or env.
-        # If list of keys is in self.config['api_keys'], multi-key client should use that.
-        # This base method assumes a single key context; multi-key clients override it.
-        if isinstance(self.config.get("api_keys"), list) and self.config["api_keys"]:
-             # This case should ideally be handled by a multi-key subclass overriding this method.
-             # For BaseLLMClient itself, if it encounters a list, it's ambiguous which one to use.
-             # However, GeminiClient (multi-key) overrides this. OpenAIClient (single-key) does not.
-             # If this BaseLLMClient is used directly with a list of keys in config (which it shouldn't),
-             # it would be an issue. So, this is mostly for single key scenarios or as a fallback.
-            logger.debug("BaseLLMClient._get_current_api_key_for_request found list of keys in config, but not a multi-key client. Using constructor api_key or first from list if available.")
-            return self.api_key or self.config["api_keys"][0]
-        return self.api_key or os.getenv("API_KEY_GENERIC_ENV_VAR") # Fallback, specific clients handle better
+        # This base method assumes a single key context. Multi-key clients (GeminiClient) override this.
+        # It prioritizes the key given at construction, then from config (if 'api_key' not 'api_keys'), then env.
+        if self.api_key: return self.api_key
+        if isinstance(self.config.get("api_key"), str): return self.config.get("api_key") # Single key in config
+        # Fallback to generic env var, specific clients should handle their specific env vars (e.g. GOOGLE_API_KEY)
+        # This is less likely to be used if clients are initialized properly by the factory.
+        return os.getenv("TRADINGAGENTS_API_KEY")
 
     def generate_text(self, prompt: str, temperature: float = 0.7, max_tokens: Optional[int] = 1500, model: Optional[str] = None,
-                      agent_name: Optional[str] = None) -> str: # Added agent_name
+                      agent_name: Optional[str] = None) -> str:
         start_time = time.time()
         effective_model = model or self.model_name
         if not effective_model:
             raise LLMConfigurationError(f"{self.__class__.__name__}: No model specified for generate_text and no default text model configured.")
 
         api_key_for_this_call = None
-        result = "" # Ensure result is defined
+        result_text = ""
+        success_flag = False
 
         def _try_generate():
-            nonlocal api_key_for_this_call, result # Allow modification
+            nonlocal api_key_for_this_call, result_text
             api_key_for_this_call = self._get_current_api_key_for_request()
-            # Log actual key hash/id if needed for tracking, not the full key. For now, 'HIDDEN'.
             key_display = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
-            logger.debug(f"Attempting generate_text with model {effective_model} (Key: {key_display}). Prompt: \"{prompt[:100]}...\"")
-            result = self._generate_text_impl(prompt, temperature, max_tokens, effective_model, api_key_for_this_call)
-            return result # Tenacity expects the retried function to return the result
+            logger.debug(f"Attempting generate_text with model {effective_model} (Key: {key_display}). Agent: {agent_name or 'Unknown'}. Prompt: \"{prompt[:100]}...\"")
+            # The _impl method is now responsible for calling _log_usage on success/failure of SDK call
+            result_text = self._generate_text_impl(prompt, temperature, max_tokens, effective_model, api_key_for_this_call, agent_name)
+            return result_text
 
         try:
             decorated_try_generate = self._get_retry_decorator()(_try_generate)
-            result = decorated_try_generate() # This will assign to outer 'result' if successful
-            return result
-        except LLMBaseException:
+            result_text = decorated_try_generate()
+            success_flag = True # If decorated_try_generate succeeds
+            return result_text
+        except LLMBaseException as e:
+            logger.error(f"LLM Error (final) in generate_text by agent '{agent_name or 'Unknown'}' for model {effective_model} (Key: ...{api_key_for_this_call[-4:] if api_key_for_this_call and len(api_key_for_this_call) > 4 else 'N/A'}): {e}")
             raise
         except Exception as e:
-            logger.error(f"Unexpected, non-LLMBaseException error during generate_text with model {effective_model}: {e.__class__.__name__} - {e}")
-            self._handle_api_error(e, operation_name="generate_text", model_name=effective_model, api_key_used=api_key_for_this_call)
-            return "" # Should not be reached if _handle_api_error re-raises (which it does)
+            logger.error(f"Unexpected non-LLM error (final) in generate_text by agent '{agent_name or 'Unknown'}' for model {effective_model} (Key: ...{api_key_for_this_call[-4:] if api_key_for_this_call and len(api_key_for_this_call) > 4 else 'N/A'}): {e.__class__.__name__} - {e}")
+            self._handle_api_error(e, operation_name="generate_text", model_name=effective_model, api_key_used=api_key_for_this_call, agent_name=agent_name, success_status=False)
+            return ""
         finally:
+            # Overall duration logging (covers all retries)
             end_time = time.time()
             duration_seconds = end_time - start_time
-            # _log_usage is now called by the _impl methods in subclasses after successful call,
-            # because they have access to token counts.
-            # However, the overall duration and key used for the final successful/failed attempt is logged here.
-            key_display_final = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
-            logger.info(f"generate_text call for model {effective_model} (Key: {key_display_final}) by agent '{agent_name or 'Unknown'}' completed. Duration: {duration_seconds:.2f}s")
-            # If _log_usage needs to be called from here with final attempt data (if _impl doesn't have all info)
-            # This would be if _impl doesn't call _log_usage itself.
-            # For now, assume _impl calls _log_usage with token counts.
-            # If result is successfully obtained, _impl should have called _log_usage.
-            # If an error occurred and was re-raised, then _log_usage for tokens might not have been called.
+            key_display_final = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env" # Key used in last attempt
+            logger.info(f"generate_text call for model {effective_model} (Key: {key_display_final}) by agent '{agent_name or 'Unknown'}' finished. Overall Duration: {duration_seconds:.2f}s. Success: {success_flag}")
+            # Note: Detailed token logging (and its associated cost) is now expected to be called
+            # from within the _impl methods by subclasses, as they have direct access to the SDK response.
+            # If an error occurs that prevents _impl from calling _log_usage (e.g. very early SDK error),
+            # we might log a "failed attempt" entry here without token counts if needed, but _log_usage in _impl handles most cases.
+
 
     def get_embedding(self, text: str, model: Optional[str] = None,
-                      agent_name: Optional[str] = None) -> List[float]: # Added agent_name
+                      agent_name: Optional[str] = None) -> List[float]:
         start_time = time.time()
         effective_model = model or self.embedding_model_name
         if not effective_model:
@@ -194,103 +167,114 @@ from tradingagents.config.pricing_loader import load_llm_pricing, get_model_cost
 
         api_key_for_this_call = None
         result_embedding: List[float] = []
+        success_flag = False
 
         def _try_embed():
             nonlocal api_key_for_this_call, result_embedding
             api_key_for_this_call = self._get_current_api_key_for_request()
             key_display = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
-            logger.debug(f"Attempting get_embedding for model {effective_model} (Key: {key_display}). Text: \"{text[:100]}...\"")
-            result_embedding = self._get_embedding_impl(text, effective_model, api_key_for_this_call)
+            logger.debug(f"Attempting get_embedding for model {effective_model} (Key: {key_display}). Agent: {agent_name or 'Unknown'}. Text: \"{text[:100]}...\"")
+            result_embedding = self._get_embedding_impl(text, effective_model, api_key_for_this_call, agent_name)
             return result_embedding
 
         try:
             decorated_try_embed = self._get_retry_decorator()(_try_embed)
             result_embedding = decorated_try_embed()
+            success_flag = True
             return result_embedding
         except LLMBaseException:
             raise
         except Exception as e:
-            logger.error(f"Unexpected, non-LLMBaseException error during get_embedding with model {effective_model}: {e.__class__.__name__} - {e}")
-            self._handle_api_error(e, operation_name="get_embedding", model_name=effective_model, api_key_used=api_key_for_this_call)
+            logger.error(f"Unexpected, non-LLM error (final) in get_embedding by agent '{agent_name or 'Unknown'}' for model {effective_model} (Key: ...{api_key_for_this_call[-4:] if api_key_for_this_call and len(api_key_for_this_call) > 4 else 'N/A'}): {e.__class__.__name__} - {e}")
+            self._handle_api_error(e, operation_name="get_embedding", model_name=effective_model, api_key_used=api_key_for_this_call, agent_name=agent_name, success_status=False)
             return []
         finally:
             end_time = time.time()
             duration_seconds = end_time - start_time
             key_display_final = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
-            logger.info(f"get_embedding call for model {effective_model} (Key: {key_display_final}) by agent '{agent_name or 'Unknown'}' completed. Duration: {duration_seconds:.2f}s")
-            # As with generate_text, assume _get_embedding_impl calls _log_usage if it has token data.
+            logger.info(f"get_embedding call for model {effective_model} (Key: {key_display_final}) by agent '{agent_name or 'Unknown'}' finished. Overall Duration: {duration_seconds:.2f}s. Success: {success_flag}")
 
-    def _handle_api_error(self, error: Exception, operation_name: str, model_name: str, api_key_used: Optional[str]):
+
+    def _handle_api_error(self, error: Exception, operation_name: str, model_name: str, api_key_used: Optional[str], agent_name: Optional[str], success_status: bool): # Added agent_name, success_status
         key_display = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 4 else "Default/Env"
-        logger.error(f"API Error during {operation_name} with model {model_name} (Key: {key_display}): {error.__class__.__name__} - {error}")
+        # Log the error with context (this is the final error after retries if any)
+        logger.error(f"API Error (final) during {operation_name} with model {model_name} (Key: {key_display}) by agent '{agent_name or 'Unknown'}': {error.__class__.__name__} - {error}")
+
+        # Log this failed call to CSV via _log_usage if it hasn't been logged by _impl already
+        # This ensures failed attempts that don't even reach _impl's own _log_usage call (e.g. very early error) get some record.
+        # However, _impl methods are now designed to call _log_usage with success=False.
+        # This _handle_api_error is more for unexpected errors *after* tenacity or if _impl doesn't catch something.
+        # For now, we rely on _impl to call _log_usage. If an error is caught here that bypassed _impl's logging,
+        # it means it's likely an error in the retry logic itself or pre-impl call.
+
         if not isinstance(error, LLMBaseException):
-            raise LLMBaseException(f"Unhandled error during {operation_name}: {error}") from error
+            raise LLMBaseException(f"Unhandled error during {operation_name} by agent '{agent_name or 'Unknown'}': {error}") from error
         raise error
 
     def _log_usage(self, model_name: str,
-                   duration_seconds: float, # Added duration
+                   duration_seconds: float,
                    prompt_tokens: Optional[int] = None,
                    completion_tokens: Optional[int] = None,
                    total_tokens: Optional[int] = None,
                    api_key_used: Optional[str] = None,
-                   agent_name: Optional[str] = None, # Added agent_name
-                   success: bool = True): # Added success status
+                   agent_name: Optional[str] = None,
+                   success: bool = True):
 
-        # Basic console logging (existing behavior, slightly enhanced)
+        # Console Logging
         log_message_parts = [f"Model: {model_name}"]
         key_display = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 4 else "Default/Env"
-        log_message_parts.append(f"Key: {key_display}")
+        log_message_parts.append(f"KeyUsed: {key_display}") # Changed label for clarity
         if agent_name: log_message_parts.append(f"Agent: {agent_name}")
-        log_message_parts.append(f"Duration: {duration_seconds:.2f}s")
+        log_message_parts.append(f"SDKDuration: {duration_seconds:.2f}s") # Clarify this is SDK call duration
         if prompt_tokens is not None: log_message_parts.append(f"PromptTokens: {prompt_tokens}")
         if completion_tokens is not None: log_message_parts.append(f"CompletionTokens: {completion_tokens}")
         if total_tokens is not None: log_message_parts.append(f"TotalTokens: {total_tokens}")
-        log_message_parts.append(f"Success: {success}")
-        logger.info(f"LLMCallLog - {', '.join(log_message_parts)}")
+        log_message_parts.append(f"CallSuccess: {success}")
+        logger.info(f"LLMCallDetails - {', '.join(log_message_parts)}")
 
         # CSV Logging
-        log_dir = "logs"
-        csv_filepath = os.path.join(log_dir, "llm_usage.csv")
+        log_dir = self.config.get("llm_usage_log_dir", "logs") # Get from config or default
+        csv_filename = self.config.get("llm_usage_csv_name", "llm_usage.csv")
+        csv_filepath = os.path.join(log_dir, csv_filename)
 
         try:
             os.makedirs(log_dir, exist_ok=True)
 
-            # Cost Estimation
             estimated_cost_usd = 0.0
-            pricing_data = load_llm_pricing() # Loads from config/llm_pricing.yaml
-            # Provider name needs to be determined. Assuming it's part of self.config or class name.
-            # This is a bit tricky as BaseLLMClient doesn't know its concrete provider name easily.
-            # Let's assume self.config['llm_provider'] holds the provider name (e.g. "google", "openai")
+            # Pricing config is loaded once and cached by the loader if not passed explicitly
+            pricing_data = load_llm_pricing(self.config.get("llm_pricing_filepath"))
             provider_name = self.config.get('llm_provider', 'unknown_provider').lower()
-
             cost_info = get_model_cost(provider_name, model_name, pricing_config=pricing_data)
 
             if cost_info:
                 input_cost = cost_info.get('input_cost_per_million_tokens', 0.0)
                 output_cost = cost_info.get('output_cost_per_million_tokens', 0.0)
+                p_tokens = prompt_tokens or 0
+                c_tokens = completion_tokens or 0
+                t_tokens = total_tokens or (p_tokens + c_tokens)
 
-                if prompt_tokens is not None:
-                    estimated_cost_usd += (prompt_tokens / 1_000_000) * input_cost
-                if completion_tokens is not None: # Text generation
-                    estimated_cost_usd += (completion_tokens / 1_000_000) * output_cost
-                elif total_tokens is not None and prompt_tokens is None: # Embeddings might only report total_tokens
-                    # Assume total_tokens for embeddings are input tokens for costing
-                    estimated_cost_usd += (total_tokens / 1_000_000) * input_cost
+                if provider_name == "openai" or "gpt" in model_name.lower() or (provider_name=="google" and "gemini" in model_name.lower() and not model_name.startswith("models/embedding")): # Text models
+                    estimated_cost_usd = (p_tokens / 1_000_000 * input_cost) + \
+                                         (c_tokens / 1_000_000 * output_cost)
+                elif "embedding" in model_name.lower(): # Embedding models
+                     # Assume total_tokens for embeddings are input tokens for costing if only total_tokens is available
+                    costable_tokens = p_tokens if p_tokens > 0 else t_tokens
+                    estimated_cost_usd = (costable_tokens / 1_000_000) * input_cost
             else:
-                logger.warning(f"No pricing info found for {provider_name}/{model_name}. Cost will be 0.")
+                logger.debug(f"No pricing info found for {provider_name}/{model_name}. Cost will be 0 for this call.")
 
             file_exists = os.path.isfile(csv_filepath)
             with open(csv_filepath, 'a', newline='', encoding='utf-8') as csvfile:
                 fieldnames = [
                     'timestamp', 'provider_name', 'api_key_identifier', 'agent_name',
                     'model_name', 'prompt_tokens', 'completion_tokens', 'total_tokens',
-                    'duration_seconds', 'estimated_cost_usd', 'success'
+                    'sdk_duration_seconds', 'estimated_cost_usd', 'success'
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 if not file_exists or os.path.getsize(csv_filepath) == 0:
                     writer.writeheader()
 
-                api_key_identifier = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 3 else "default"
+                api_key_identifier = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 3 else "default/env"
 
                 writer.writerow({
                     'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -300,8 +284,8 @@ from tradingagents.config.pricing_loader import load_llm_pricing, get_model_cost
                     'model_name': model_name,
                     'prompt_tokens': prompt_tokens if prompt_tokens is not None else 0,
                     'completion_tokens': completion_tokens if completion_tokens is not None else 0,
-                    'total_tokens': total_tokens if total_tokens is not None else (prompt_tokens or 0) + (completion_tokens or 0),
-                    'duration_seconds': round(duration_seconds, 3),
+                    'total_tokens': total_tokens if total_tokens is not None else ((prompt_tokens or 0) + (completion_tokens or 0)),
+                    'sdk_duration_seconds': round(duration_seconds, 3),
                     'estimated_cost_usd': round(estimated_cost_usd, 8),
                     'success': success
                 })

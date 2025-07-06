@@ -6,9 +6,9 @@ import json
 from datetime import date
 from typing import Dict, Any, Tuple, List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_openai import ChatOpenAI # Removed
+# from langchain_anthropic import ChatAnthropic # Removed
+from langchain_google_genai import ChatGoogleGenerativeAI # Keep for Gemini-based Langchain agents
 
 from langgraph.prebuilt import ToolNode
 
@@ -141,15 +141,29 @@ class TradingAgentsGraph:
                         if not os.getenv("GOOGLE_API_KEY") and not api_key_for_lc: # Check again
                             raise ValueError(f"GOOGLE_API_KEY not found for Langchain Google model: {lc_model_name}")
                     except ImportError: raise ValueError("dotenv not installed for Langchain Google key loading.")
+
+                # Ensure genai is configured before ChatGoogleGenerativeAI tries to use it,
+                # if a GeminiClient hasn't already configured it.
+                # ChatGoogleGenerativeAI itself will also try to use GOOGLE_API_KEY from env.
+                # This check is more of a safeguard.
+                if not genai.is_configured(): # genai needs to be imported in this scope
+                    import google.generativeai as genai # Local import for this check
+                    g_api_key_for_configure = api_key_for_lc or os.getenv("GOOGLE_API_KEY")
+                    if not g_api_key_for_configure:
+                        # This state should ideally be caught by GeminiClient init if 'google' is a needed provider.
+                        # Or if only Langchain uses google, then this is the main check.
+                        raise ValueError("GOOGLE_API_KEY must be set for ChatGoogleGenerativeAI if genai not pre-configured by a GeminiClient.")
+                    genai.configure(api_key=g_api_key_for_configure)
+
                 self.langchain_chat_models_lc[key] = ChatGoogleGenerativeAI(model=lc_model_name, google_api_key=api_key_for_lc or os.getenv("GOOGLE_API_KEY"))
-            elif lc_provider_name == "openai":
-                openai_base_url = provider_specific_lc_config.get("base_url")
-                # OpenAI SDK uses OPENAI_API_KEY env var by default if api_key param is None
-                self.langchain_chat_models_lc[key] = ChatOpenAI(model=lc_model_name, base_url=openai_base_url, api_key=api_key_for_lc)
-            elif lc_provider_name == "anthropic":
-                self.langchain_chat_models_lc[key] = ChatAnthropic(model=lc_model_name, anthropic_api_key=api_key_for_lc or os.getenv("ANTHROPIC_API_KEY"))
+            # elif lc_provider_name == "openai": # REMOVED
+            #     openai_base_url = provider_specific_lc_config.get("base_url")
+            #     self.langchain_chat_models_lc[key] = ChatOpenAI(model=lc_model_name, base_url=openai_base_url, api_key=api_key_for_lc)
+            # elif lc_provider_name == "anthropic": # REMOVED
+            #     self.langchain_chat_models_lc[key] = ChatAnthropic(model=lc_model_name, anthropic_api_key=api_key_for_lc or os.getenv("ANTHROPIC_API_KEY"))
             else:
-                raise ValueError(f"Unsupported LLM provider '{lc_provider_name}' for Langchain ChatModel key '{key}'")
+                # If other providers were supported, they'd be here. Now, only "google" is expected for Langchain.
+                raise ValueError(f"Unsupported LLM provider '{lc_provider_name}' for Langchain ChatModel key '{key}'. This fork is Gemini-only.")
             print(f"Initialized Langchain ChatModel '{key}': Provider: {lc_provider_name}, Model: {lc_model_name}")
 
         self.toolkit = Toolkit(config=self.config)

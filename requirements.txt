@@ -1,5 +1,5 @@
 typing-extensions
-langchain-openai
+# langchain-openai # Removed from top as well
 langchain-experimental
 pandas
 yfinance
@@ -22,7 +22,7 @@ redis
 chainlit
 rich
 questionary
-langchain_anthropic
+# langchain_anthropic # Removed
 langchain-google-genai
 python-dotenv
 PyYAML
@@ -31,3 +31,4 @@ pytest-mock
 streamlit
 tenacity
 pandas
+# langchain-openai # Removed (was already removed or not present in latest version from previous steps)
