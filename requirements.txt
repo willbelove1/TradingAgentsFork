@@ -26,3 +26,5 @@ langchain_anthropic
 langchain-google-genai
 python-dotenv
 PyYAML
+pytest
+pytest-mock

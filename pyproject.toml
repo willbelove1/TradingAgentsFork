@@ -32,5 +32,11 @@ dependencies = [
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
     "python-dotenv>=1.0.0",
-    "PyYAML>=6.0", # Added PyYAML
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-mock>=3.0",
 ]
