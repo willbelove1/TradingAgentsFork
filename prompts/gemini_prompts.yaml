@@ -1,0 +1,19 @@
+trader_evaluate_plan: |
+  Bạn là một nhà giao dịch thông minh. Hãy đọc báo cáo dưới đây và trả lời:
+
+  Báo cáo có đủ cơ sở để ra quyết định chưa?
+  Có cần yêu cầu làm rõ gì không?
+  Output: JSON {
+    "decision_ready": true/false,
+    "clarification_needed": true/false,
+    "clarification_question": "..."
+  }
+trader_final_decision: |
+  Với thông tin làm rõ (nếu có) và báo cáo ban đầu, hãy ra quyết định cuối cùng.
+  Output: JSON {
+    "action": "...",
+    "reason": "..."
+  }
+research_clarify: |
+  Một nhà giao dịch cần bạn làm rõ thông tin sau: {question}.
+  Hãy trả lời ngắn gọn, logic.

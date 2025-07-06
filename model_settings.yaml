@@ -1,0 +1,10 @@
+agents:
+  trader:
+    model: gemini-pro
+    prompts:
+      evaluate: trader_evaluate_plan
+      clarify: trader_final_decision
+  researcher:
+    model: gemini-flash
+    prompts:
+      clarify: research_clarify

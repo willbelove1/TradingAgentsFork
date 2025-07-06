@@ -74,3 +74,9 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+
+    # Trader consultation state
+    consultation_round: Annotated[Optional[int], "Current round of consultation between Trader and ResearchManager"]
+    clarification_requested: Annotated[Optional[bool], "Flag indicating if clarification has been requested by the Trader"]
+    clarification_question: Annotated[Optional[str], "The question asked by the Trader for clarification"]
+    clarification_response: Annotated[Optional[str], "The response provided by the ResearchManager to the clarification question"]

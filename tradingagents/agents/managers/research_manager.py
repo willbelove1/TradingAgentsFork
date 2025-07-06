@@ -53,3 +53,25 @@ Debate History:
         }
 
     return research_manager_node
+
+
+def researcher_node(input_data, state, llm_client, prompt_cfg):
+    if state.get("clarification_question"):
+        # Assuming prompt_cfg is a dictionary where keys are prompt names
+        # and values are the actual prompt strings from gemini_prompts.yaml.
+        # The value for "clarify" would be the template:
+        # "Một nhà giao dịch cần bạn làm rõ thông tin sau: {question}. Hãy trả lời ngắn gọn, logic."
+
+        prompt_template = prompt_cfg["clarify"]
+        # Fill the placeholder in the template with the actual question from the state
+        formatted_prompt = prompt_template.format(question=state["clarification_question"])
+
+        # Generate the answer using the llm_client with the formatted prompt
+        answer = llm_client.generate(formatted_prompt)
+
+        # Store the response in the state
+        state["clarification_response"] = answer
+        return answer
+    # If there's no clarification_question in the state, implicitly return None.
+    # Consider if specific error handling or a different return value is needed here.
+    return None
