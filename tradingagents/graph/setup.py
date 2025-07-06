@@ -29,14 +29,14 @@ class GraphSetup:
         risk_manager_memory,
         conditional_logic: ConditionalLogic,
         agent_model_configs: Dict[str, Any],
+        all_prompts: Dict[str, Any], # Added all_prompts
     ):
         """Initialize with required components."""
-        # self.quick_thinking_llm_lc = quick_thinking_llm_lc # Removed
-        # self.deep_thinking_llm_lc = deep_thinking_llm_lc # Removed
-        self.langchain_chat_models_lc_dict = langchain_chat_models_lc_dict # Store the dict
+        self.langchain_chat_models_lc_dict = langchain_chat_models_lc_dict
         self.toolkit = toolkit
         self.tool_nodes = tool_nodes
         self.agent_model_configs = agent_model_configs
+        self.all_prompts = all_prompts # Store loaded prompts
         self.bull_memory = bull_memory
         self.bear_memory = bear_memory
         self.trader_memory = trader_memory
@@ -79,43 +79,70 @@ class GraphSetup:
             llm_instance = self.langchain_chat_models_lc_dict.get(llm_instance_key)
             if not llm_instance:
                 raise ValueError(f"LLM instance for key '{llm_instance_key}' (for agent '{agent_name_key}') not found in langchain_chat_models_lc_dict.")
-            return llm_instance
+
+            # Get prompt_config for this agent
+            prompt_key = agent_cfg.get("prompt_key")
+            if not prompt_key:
+                raise ValueError(f"Prompt key ('prompt_key') not specified in agent_model_configs for '{agent_name_key}'")
+
+            # Determine provider for prompt loading if prompts are provider-specific in future
+            # For now, assuming all prompts are in the main self.all_prompts (e.g., gemini_prompts)
+            # provider_for_prompt = agent_cfg.get('llm_provider', self.agent_model_configs.get('llm_provider', 'google'))
+            prompt_config = get_prompt_config(prompt_key, prompts_config=self.all_prompts)
+            if not prompt_config:
+                 raise ValueError(f"Prompt config for key '{prompt_key}' (for agent '{agent_name_key}') not found.")
+
+            return llm_instance, prompt_config
 
         if "market" in selected_analysts:
-            llm_instance = get_lc_llm_for_agent("MarketAnalyst")
-            analyst_nodes["market"] = create_market_analyst(llm_instance, self.toolkit)
+            llm_instance, prompt_cfg = get_lc_llm_for_agent("MarketAnalyst")
+            analyst_nodes["market"] = create_market_analyst(llm_instance, self.toolkit, prompt_cfg)
             delete_nodes["market"] = create_msg_delete()
             tool_nodes["market"] = self.tool_nodes["market"]
 
         if "social" in selected_analysts:
-            llm_instance = get_lc_llm_for_agent("SocialMediaAnalyst")
-            analyst_nodes["social"] = create_social_media_analyst(llm_instance, self.toolkit)
+            llm_instance, prompt_cfg = get_lc_llm_for_agent("SocialMediaAnalyst")
+            analyst_nodes["social"] = create_social_media_analyst(llm_instance, self.toolkit, prompt_cfg)
             delete_nodes["social"] = create_msg_delete()
             tool_nodes["social"] = self.tool_nodes["social"]
 
         if "news" in selected_analysts:
-            llm_instance = get_lc_llm_for_agent("NewsAnalyst")
-            analyst_nodes["news"] = create_news_analyst(llm_instance, self.toolkit)
+            llm_instance, prompt_cfg = get_lc_llm_for_agent("NewsAnalyst")
+            analyst_nodes["news"] = create_news_analyst(llm_instance, self.toolkit, prompt_cfg)
             delete_nodes["news"] = create_msg_delete()
             tool_nodes["news"] = self.tool_nodes["news"]
 
         if "fundamentals" in selected_analysts:
-            llm_instance = get_lc_llm_for_agent("FundamentalsAnalyst")
-            analyst_nodes["fundamentals"] = create_fundamentals_analyst(llm_instance, self.toolkit)
+            llm_instance, prompt_cfg = get_lc_llm_for_agent("FundamentalsAnalyst")
+            analyst_nodes["fundamentals"] = create_fundamentals_analyst(llm_instance, self.toolkit, prompt_cfg)
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
         # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(get_lc_llm_for_agent("BullResearcher"), self.bull_memory)
-        bear_researcher_node = create_bear_researcher(get_lc_llm_for_agent("BearResearcher"), self.bear_memory)
-        research_manager_node = create_research_manager(get_lc_llm_for_agent("ResearchManager"), self.invest_judge_memory)
-        trader_node = create_trader(get_lc_llm_for_agent("Trader"), self.trader_memory)
+        bull_llm, bull_prompt_cfg = get_lc_llm_for_agent("BullResearcher")
+        bull_researcher_node = create_bull_researcher(bull_llm, self.bull_memory, bull_prompt_cfg)
+
+        bear_llm, bear_prompt_cfg = get_lc_llm_for_agent("BearResearcher")
+        bear_researcher_node = create_bear_researcher(bear_llm, self.bear_memory, bear_prompt_cfg)
+
+        research_mgr_llm, research_mgr_prompt_cfg = get_lc_llm_for_agent("ResearchManager")
+        research_manager_node = create_research_manager(research_mgr_llm, self.invest_judge_memory, research_mgr_prompt_cfg)
+
+        trader_llm, trader_prompt_cfg = get_lc_llm_for_agent("Trader")
+        trader_node = create_trader(trader_llm, self.trader_memory, trader_prompt_cfg)
 
         # Create risk analysis nodes
-        risky_analyst = create_risky_debator(get_lc_llm_for_agent("RiskyDebator"))
-        neutral_analyst = create_neutral_debator(get_lc_llm_for_agent("NeutralDebator"))
-        safe_analyst = create_safe_debator(get_lc_llm_for_agent("SafeDebator"))
-        risk_manager_node = create_risk_manager(get_lc_llm_for_agent("RiskManager"), self.risk_manager_memory)
+        risky_llm, risky_prompt_cfg = get_lc_llm_for_agent("RiskyDebator")
+        risky_analyst = create_risky_debator(risky_llm, risky_prompt_cfg)
+
+        neutral_llm, neutral_prompt_cfg = get_lc_llm_for_agent("NeutralDebator")
+        neutral_analyst = create_neutral_debator(neutral_llm, neutral_prompt_cfg)
+
+        safe_llm, safe_prompt_cfg = get_lc_llm_for_agent("SafeDebator")
+        safe_analyst = create_safe_debator(safe_llm, safe_prompt_cfg)
+
+        risk_mgr_llm, risk_mgr_prompt_cfg = get_lc_llm_for_agent("RiskManager")
+        risk_manager_node = create_risk_manager(risk_mgr_llm, self.risk_manager_memory, risk_mgr_prompt_cfg)
 
         # Create workflow
         workflow = StateGraph(AgentState)

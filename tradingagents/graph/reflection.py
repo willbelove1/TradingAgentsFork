@@ -5,28 +5,39 @@ from typing import Dict, Any
 # from langchain_google_genai import ChatGoogleGenerativeAI
 from tradingagents.llm_clients import BaseLLMClient # Import BaseLLMClient
 
+from tradingagents.config.prompt_loader import format_prompt # Import formatter
+
 class Reflector:
     """Handles reflection on decisions and updating memory."""
 
-    def __init__(self, llm_client: BaseLLMClient, component_config: Dict = None):
+    def __init__(self, llm_client: BaseLLMClient, component_config: Optional[Dict] = None, prompt_config: Optional[Dict] = None):
         """
-        Initialize the reflector with an LLM client and component-specific configuration.
+        Initialize the reflector.
         Args:
             llm_client (BaseLLMClient): The LLM client instance.
-            component_config (Dict, optional): Configuration for this component, potentially
-                                               containing 'model', 'temperature', 'max_tokens'.
+            component_config (Dict, optional): Config for model, temp, max_tokens.
+            prompt_config (Dict, optional): Config for system_prompt, user_template from prompts YAML.
         """
         self.llm_client = llm_client
         self.component_config = component_config if component_config else {}
-        self.reflection_system_prompt = self._get_reflection_prompt()
-        # Potentially override default model from llm_client if specified in component_config
+        self.prompt_config = prompt_config if prompt_config else {}
+
+        # Get model and generation parameters
         self.model_name = self.component_config.get('model', self.llm_client.model_name)
-        self.temperature = self.component_config.get('temperature', 0.6) # Default from previous hardcoding
-        self.max_tokens = self.component_config.get('max_tokens', 2048)  # Default from previous hardcoding
+        self.temperature = self.component_config.get('temperature', 0.6)
+        self.max_tokens = self.component_config.get('max_tokens', 2048)
+
+        # Get prompt parts from prompt_config
+        # If prompt_config is empty or doesn't have the keys, it will use defaults or empty strings.
+        # The 'ReflectorTask' from gemini_prompts.yaml should provide these.
+        self.system_prompt = self.prompt_config.get('system_prompt', self._get_default_reflection_system_prompt())
+        self.user_template = self.prompt_config.get('user_prompt_template', self._get_default_reflection_user_template())
+        # Few-shot examples can be loaded if ReflectorTask in YAML defines them
+        # self.few_shot_examples_string = self.prompt_config.get('few_shot_examples_string', "")
 
 
-    def _get_reflection_prompt(self) -> str:
-        """Get the system prompt for reflection."""
+    def _get_default_reflection_system_prompt(self) -> str: # Renamed for clarity
+        """Get the default system prompt for reflection if not provided in YAML."""
         return """
 You are an expert financial analyst tasked with reviewing trading decisions/analysis and providing a comprehensive, step-by-step analysis. 
 Your goal is to deliver detailed insights into investment decisions and highlight opportunities for improvement, adhering strictly to the following guidelines:
@@ -68,24 +79,60 @@ Adhere strictly to these instructions, and ensure your output is detailed, accur
 
         return f"{curr_market_report}\n\n{curr_sentiment_report}\n\n{curr_news_report}\n\n{curr_fundamentals_report}"
 
+    def _get_default_reflection_user_template(self) -> str:
+        """Get the default user prompt template for reflection if not provided in YAML."""
+        return """Component Type: {component_type}
+Returns/Losses: {returns_losses}
+Analysis/Decision Provided: {report_text}
+Objective Market Reports for Reference:
+{situation_context}
+---
+Dựa trên tất cả thông tin trên, hãy cung cấp phân tích chi tiết từng bước, đề xuất cải thiện, tóm tắt bài học kinh nghiệm, và một câu truy vấn (query) ngắn gọn (tối đa 1000 token) để ghi nhớ bài học này."""
+
+
     def _reflect_on_component(
         self, component_type: str, report: str, situation: str, returns_losses
     ) -> str:
         """Generate reflection for a component."""
-        # Construct a single prompt string for generate_text
-        # The system prompt can be prepended or incorporated into the user prompt.
-        # For simplicity here, we'll prepend it.
-        full_prompt = f"{self.reflection_system_prompt}\n\n" \
-                      f"Component Type: {component_type}\n" \
-                      f"Returns/Losses: {returns_losses}\n\n" \
-                      f"Analysis/Decision Provided: {report}\n\n" \
-                      f"Objective Market Reports for Reference:\n{situation}\n\n" \
-                      f"Based on all the above, provide your step-by-step analysis, improvement suggestions, summary, and query."
 
-        from tradingagents.llm_clients.base_client import logger as client_logger # Use the same logger for context
-        client_logger.info(f"Reflector: Calling LLM. Model: {self.model_name}, Temperature: {self.temperature}, Max Tokens: {self.max_tokens}, Component: {component_type}")
+        context_vars = {
+            "component_type": component_type,
+            "returns_losses": returns_losses,
+            "report_text": report, # Ensure placeholder in YAML matches this
+            "situation_context": situation # Ensure placeholder in YAML matches this
+        }
 
-        # Using the llm_client's generate_text method with model and parameters from component_config
+        # Use the new format_prompt function with the loaded prompt_config
+        # The prompt_config for Reflector should have 'system_prompt' and 'user_prompt_template'
+        # and potentially 'few_shot_examples_string'.
+        # We pass self.prompt_config (which was loaded from self.all_prompts[prompt_key])
+        # and the context_vars to fill the user_template.
+        # The format_prompt function will combine system_prompt, few_shots (if any from prompt_config), and filled user_template.
+
+        # Construct the full prompt using the loaded configurations
+        # The self.prompt_config should contain 'system_prompt', 'user_prompt_template', etc.
+        # if 'ReflectorTask' was correctly defined and loaded.
+        # If self.prompt_config is empty, format_prompt might use defaults or return empty.
+
+        # We need to ensure self.prompt_config is not empty and has the necessary keys.
+        # For this, we create a temporary config dict to pass to format_prompt,
+        # using the Reflector's specific system_prompt and user_template loaded in __init__.
+        current_prompt_structure = {
+            "system_prompt": self.system_prompt,
+            "user_prompt_template": self.user_template,
+            "few_shot_examples_string": self.prompt_config.get('few_shot_examples_string', "") # Use if defined
+            # "type" is not strictly needed by format_prompt if we handle logic here.
+        }
+
+        full_prompt = format_prompt(current_prompt_structure, context_vars)
+
+        if not full_prompt.strip(): # Check if prompt is empty after formatting
+            logger.error("Reflector: Generated prompt is empty. Check prompt_config and context_vars.")
+            return "Error: Could not generate reflection prompt."
+
+        from tradingagents.llm_clients.base_client import logger # Ensure logger is accessible
+        logger.info(f"Reflector: Calling LLM. Model: {self.model_name}, Temperature: {self.temperature}, Max Tokens: {self.max_tokens}, Component: {component_type}")
+
         result = self.llm_client.generate_text(
             prompt=full_prompt,
             model=self.model_name,

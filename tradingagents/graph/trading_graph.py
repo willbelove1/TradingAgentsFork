@@ -62,6 +62,18 @@ class TradingAgentsGraph:
         self.agent_configs = self.config.get('agent_model_configs', {})
         default_provider = self.config.get("llm_provider", "google").lower()
 
+        # --- Load Prompts ---
+        # Assuming prompt_loader is accessible and loads based on default or specified provider in future
+        from tradingagents.config.prompt_loader import load_prompts_from_file, get_prompt_config, format_prompt, PROMPTS_DIR, GEMINI_PROMPTS_FILENAME
+        # Determine path to prompts directory (assuming it's relative to project root)
+        project_root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        # For now, always load Gemini prompts. Can be made dynamic by provider later.
+        gemini_prompts_filepath = os.path.join(project_root_path, PROMPTS_DIR, GEMINI_PROMPTS_FILENAME)
+        self.all_prompts = load_prompts_from_file(gemini_prompts_filepath)
+        if not self.all_prompts:
+            print(f"Warning: Could not load any prompts from {gemini_prompts_filepath}. Prompts will be default or hardcoded.")
+
+
         # --- Initialize a dictionary of BaseLLMClient instances, one per provider needed ---
         self.llm_clients: Dict[str, BaseLLMClient] = {}
 
@@ -174,23 +186,45 @@ class TradingAgentsGraph:
             invest_judge_memory=self.invest_judge_memory,
             risk_manager_memory=self.risk_manager_memory,
             conditional_logic=self.conditional_logic,
-            agent_model_configs=self.agent_configs
+            agent_model_configs=self.agent_configs,
+            all_prompts=self.all_prompts # Pass loaded prompts to GraphSetup
         )
 
         self.propagator = Propagator()
 
-        reflector_cfg = self.agent_configs.get('Reflector', {})
+        # Initialize Reflector with its specific prompt config
+        reflector_comp_cfg = self.agent_configs.get('Reflector', {})
+        reflector_prompt_key = reflector_comp_cfg.get('prompt_key', 'ReflectorTask') # Default key
+        reflector_prompt_cfg = get_prompt_config(reflector_prompt_key, prompts_config=self.all_prompts)
         reflector_client = get_client_for_component('Reflector')
-        self.reflector = Reflector(llm_client=reflector_client, component_config=reflector_cfg)
+        self.reflector = Reflector(
+            llm_client=reflector_client,
+            component_config=reflector_comp_cfg,
+            prompt_config=reflector_prompt_cfg
+        )
 
-        signal_processor_cfg = self.agent_configs.get('SignalProcessor', {})
+        # Initialize SignalProcessor with its specific prompt config
+        signal_processor_comp_cfg = self.agent_configs.get('SignalProcessor', {})
+        signal_processor_prompt_key = signal_processor_comp_cfg.get('prompt_key', 'SignalProcessorTask')
+        signal_processor_prompt_cfg = get_prompt_config(signal_processor_prompt_key, prompts_config=self.all_prompts)
         signal_processor_client = get_client_for_component('SignalProcessor')
-        self.signal_processor = SignalProcessor(llm_client=signal_processor_client, component_config=signal_processor_cfg)
+        self.signal_processor = SignalProcessor(
+            llm_client=signal_processor_client,
+            component_config=signal_processor_comp_cfg,
+            prompt_config=signal_processor_prompt_cfg
+        )
 
+        # Configure dataflows.interface with its client and prompt config (for one default prompt)
         from tradingagents.dataflows import interface as dataflows_interface
-        interface_functions_cfg = self.agent_configs.get('InterfaceFunctions', {})
+        interface_functions_comp_cfg = self.agent_configs.get('InterfaceFunctions', {})
+        interface_prompt_key = interface_functions_comp_cfg.get('prompt_key', 'NewsSummarization') # Default key for interface functions
+        interface_prompt_cfg = get_prompt_config(interface_prompt_key, prompts_config=self.all_prompts)
         interface_client = get_client_for_component('InterfaceFunctions')
-        dataflows_interface.set_interface_llm_client(interface_client, component_config=interface_functions_cfg)
+        dataflows_interface.set_interface_llm_client(
+            client=interface_client,
+            component_config=interface_functions_comp_cfg,
+            default_prompt_config=interface_prompt_cfg # Pass the loaded prompt config
+        )
 
         # State tracking
         self.curr_state = None

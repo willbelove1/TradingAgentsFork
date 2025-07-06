@@ -21,48 +21,59 @@ from typing import Optional
 
 # Global LLM client for interface functions - initialized on first use or can be set externally.
 # This is one way to manage it; another is to pass client to each function.
+from tradingagents.config.prompt_loader import format_prompt as format_prompt_from_loader # Avoid name clash
+
 # For simplicity in refactoring existing functions, a module-level client can be easier.
 _interface_llm_client: Optional[BaseLLMClient] = None
-_interface_component_config: Dict = {} # To store config for these functions
+_interface_component_config: Dict = {} # To store model/temp/max_tokens config for these functions
+_interface_default_prompt_config: Dict = {} # To store the default prompt structure for these functions
 
-def _get_interface_llm_client() -> BaseLLMClient:
-    """Initializes or returns the module-level LLM client."""
-    global _interface_llm_client, _interface_component_config
+def _get_interface_llm_client_and_configs() -> Tuple[BaseLLMClient, Dict, Dict]:
+    """Initializes or returns the module-level LLM client and its associated configs."""
+    global _interface_llm_client, _interface_component_config, _interface_default_prompt_config
     if _interface_llm_client is None:
-        logger.info("Initializing module-level LLM client for dataflows.interface as it was not set externally.")
-        # This will use the global config, including model_settings.yaml
-        # The specific config for "InterfaceFunctions" from model_settings.yaml will be stored
-        # in _interface_component_config when set_interface_llm_client is called.
-        # If set_interface_llm_client is NOT called before first use here,
-        # _interface_component_config might be empty, and defaults will be used.
-        app_config = get_config() # This now includes model_settings.yaml
-        _interface_llm_client = get_llm_client(config=app_config)
-        # Try to grab InterfaceFunctions config if not set via explicit call
-        if not _interface_component_config:
-             _interface_component_config = app_config.get('agent_model_configs', {}).get('InterfaceFunctions', {})
-             logger.info(f"InterfaceFunctions config loaded internally: {_interface_component_config}")
+        logger.info("Initializing module-level LLM client and configs for dataflows.interface as they were not set externally.")
+        app_config = get_config()
+        _interface_llm_client = get_llm_client(config=app_config) # Uses global provider, default models
 
-    return _interface_llm_client
+        # Component config for model, temp, max_tokens
+        _interface_component_config = app_config.get('agent_model_configs', {}).get('InterfaceFunctions', {})
+        logger.info(f"InterfaceFunctions - Component Config (model/temp/tokens) loaded internally: {_interface_component_config}")
 
-def set_interface_llm_client(client: BaseLLMClient, component_config: Optional[Dict] = None):
+        # Prompt config (system, user_template, etc.)
+        default_prompt_key = _interface_component_config.get('prompt_key', 'NewsSummarization') # Default if not in config
+        # Need to load all prompts to get the specific one
+        from tradingagents.config.prompt_loader import load_prompts_from_file, get_prompt_config, PROMPTS_DIR, GEMINI_PROMPTS_FILENAME
+        project_root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        prompts_filepath = os.path.join(project_root_path, PROMPTS_DIR, GEMINI_PROMPTS_FILENAME) # Assuming Gemini for now
+        all_prompts = load_prompts_from_file(prompts_filepath)
+        _interface_default_prompt_config = get_prompt_config(default_prompt_key, prompts_config=all_prompts) or {}
+        if not _interface_default_prompt_config:
+            logger.warning(f"InterfaceFunctions - Default prompt for key '{default_prompt_key}' not found. LLM calls might fail or use empty prompts.")
+        else:
+            logger.info(f"InterfaceFunctions - Default Prompt Config for key '{default_prompt_key}' loaded internally: "
+                        f"System prompt starts with: '{_interface_default_prompt_config.get('system_prompt', '')[:50]}...'")
+
+    return _interface_llm_client, _interface_component_config, _interface_default_prompt_config
+
+def set_interface_llm_client(client: BaseLLMClient,
+                             component_config: Optional[Dict] = None,
+                             default_prompt_config: Optional[Dict] = None):
     """
-    Allows setting the LLM client and its specific configuration externally,
-    e.g., from TradingAgentsGraph.
-    Args:
-        client (BaseLLMClient): The LLM client instance.
-        component_config (Dict, optional): Configuration for interface functions.
+    Allows setting the LLM client, its component config (model/temp/tokens),
+    and a default prompt configuration externally.
     """
-    global _interface_llm_client, _interface_component_config
+    global _interface_llm_client, _interface_component_config, _interface_default_prompt_config
     logger.info(f"External LLM client set for dataflows.interface: {client.__class__.__name__}")
     _interface_llm_client = client
+
     if component_config is not None:
         _interface_component_config = component_config
-        logger.info(f"Component config for dataflows.interface set: {_interface_component_config}")
-    else:
-        # If no specific config passed, try to get it from global config
-        app_config = get_config()
-        _interface_component_config = app_config.get('agent_model_configs', {}).get('InterfaceFunctions', {})
-        logger.info(f"Component config for dataflows.interface derived from global: {_interface_component_config}")
+        logger.info(f"InterfaceFunctions - Component Config (model/temp/tokens) set: {_interface_component_config}")
+
+    if default_prompt_config is not None:
+        _interface_default_prompt_config = default_prompt_config
+        logger.info(f"InterfaceFunctions - Default Prompt Config set: System prompt starts with '{_interface_default_prompt_config.get('system_prompt', '')[:50]}...'")
 
 
 def get_finnhub_news(
@@ -761,27 +772,49 @@ def get_llm_generated_stock_news(ticker: str, curr_date: str) -> str:
     The refactored version will use plain text generation.
     For actual web search, a separate search tool/API integration would be needed.
     """
-    client = _get_interface_llm_client()
-    # The prompt needs to be designed for pure text generation based on the LLM's knowledge,
-    # or it implies the LLM itself has web search capabilities (like some versions of Gemini or ChatGPT with browsing).
-    # The original prompt implied a search action. We'll rephrase for general knowledge retrieval if not a search-enabled model.
-    prompt = (
-        f"Provide a summary of significant news or discussions related to the stock ticker {ticker} "
-        f"that occurred in the 7 days leading up to {curr_date}. Focus on information relevant to trading decisions. "
-        f"If you have access to real-time or very recent information, please use it. Otherwise, base your summary on your general knowledge up to your last training cut-off."
-    )
+    client, comp_config, prompt_config = _get_interface_llm_client_and_configs()
 
-    # Model name can be specified if we want to use a different one from client's default
-    # e.g., client.config.get('quick_think_llm_model_name') or a hardcoded one.
-    # For now, it uses the client's default model (likely from 'default_model' in config).
-    model_name = _interface_component_config.get('model', client.model_name)
-    temperature = _interface_component_config.get('temperature', 0.7)
-    max_tokens = _interface_component_config.get('max_tokens', 1024)
+    # Use the default_prompt_config loaded for InterfaceFunctions, but allow specific context.
+    # If InterfaceFunctions needs different prompts for stock_news vs global_news,
+    # then model_settings.yaml would need separate prompt_keys for them,
+    # and this function would use its specific key.
+    # For now, assume one generic prompt_config for InterfaceFunctions is used,
+    # and we fill its user_template.
+
+    context_vars = {
+        "ticker": ticker, # Assuming template uses {ticker}
+        "curr_date": curr_date, # Assuming template uses {curr_date}
+        "time_window": "7 days", # Example, can be part of template or context
+        "focus_area": "stock-specific news and discussions relevant to trading"
+        # Add other variables if your user_prompt_template for InterfaceFunctions needs them
+    }
+
+    # Ensure prompt_config is not empty and has user_prompt_template
+    if not prompt_config or not prompt_config.get('user_prompt_template'):
+        logger.error(f"InterfaceFunctions (get_llm_generated_stock_news): Prompt config or user_template missing. Config: {prompt_config}")
+        # Fallback to a hardcoded basic prompt if template is missing
+        user_prompt_for_call = (
+            f"Provide a summary of significant news or discussions related to the stock ticker {ticker} "
+            f"that occurred in the 7 days leading up to {curr_date}. Focus on information relevant to trading decisions."
+        )
+        # System prompt would be the default from the client or a basic one.
+        # This path should ideally not be taken if YAML is configured correctly.
+        full_prompt = f"{prompt_config.get('system_prompt', '')}\n\n{user_prompt_for_call}".strip()
+    else:
+        full_prompt = format_prompt_from_loader(prompt_config, context_vars)
+
+    if not full_prompt.strip():
+        logger.error("InterfaceFunctions (get_llm_generated_stock_news): Formatted prompt is empty.")
+        return f"Error: Could not generate prompt for stock news {ticker}."
+
+    model_name = comp_config.get('model', client.model_name)
+    temperature = comp_config.get('temperature', 0.7)
+    max_tokens = comp_config.get('max_tokens', 1024)
 
     try:
         logger.info(f"InterfaceFunctions (get_llm_generated_stock_news): Calling LLM. Model: {model_name}, Temp: {temperature}, MaxTokens: {max_tokens}")
         response_text = client.generate_text(
-            prompt,
+            full_prompt, # Use the formatted prompt
             model=model_name,
             temperature=temperature,
             max_tokens=max_tokens
@@ -797,20 +830,37 @@ def get_llm_generated_global_news(curr_date: str) -> str:
     Generates global/macroeconomics news summary using the configured LLM.
     Similar caveats as above regarding actual web search vs. knowledge retrieval.
     """
-    client = _get_interface_llm_client()
-    prompt = (
-        f"Summarize key global or macroeconomic news events from the 7 days prior to {curr_date} "
-        f"that would be informative for financial trading purposes. "
-        f"If you have access to real-time or very recent information, please use it. Otherwise, base your summary on your general knowledge up to your last training cut-off."
-    )
-    model_name = _interface_component_config.get('model', client.model_name)
-    temperature = _interface_component_config.get('temperature', 0.7)
-    max_tokens = _interface_component_config.get('max_tokens', 1024)
+    client, comp_config, prompt_config = _get_interface_llm_client_and_configs()
+
+    context_vars = {
+        "curr_date": curr_date,
+        "time_window": "7 days",
+        "focus_area": "global or macroeconomic news events relevant for financial trading"
+        # "topic" could be another var if template is generic: "general macroeconomics"
+    }
+
+    if not prompt_config or not prompt_config.get('user_prompt_template'):
+        logger.error(f"InterfaceFunctions (get_llm_generated_global_news): Prompt config or user_template missing. Config: {prompt_config}")
+        user_prompt_for_call = (
+            f"Summarize key global or macroeconomic news events from the 7 days prior to {curr_date} "
+            f"that would be informative for financial trading purposes."
+        )
+        full_prompt = f"{prompt_config.get('system_prompt', '')}\n\n{user_prompt_for_call}".strip()
+    else:
+        full_prompt = format_prompt_from_loader(prompt_config, context_vars)
+
+    if not full_prompt.strip():
+        logger.error("InterfaceFunctions (get_llm_generated_global_news): Formatted prompt is empty.")
+        return f"Error: Could not generate prompt for global news on {curr_date}."
+
+    model_name = comp_config.get('model', client.model_name)
+    temperature = comp_config.get('temperature', 0.7)
+    max_tokens = comp_config.get('max_tokens', 1024)
 
     try:
         logger.info(f"InterfaceFunctions (get_llm_generated_global_news): Calling LLM. Model: {model_name}, Temp: {temperature}, MaxTokens: {max_tokens}")
         response_text = client.generate_text(
-            prompt,
+            full_prompt,
             model=model_name,
             temperature=temperature,
             max_tokens=max_tokens
@@ -826,21 +876,38 @@ def get_llm_generated_fundamentals(ticker: str, curr_date: str) -> str:
     The original prompt asked for a table (PE/PS/Cash flow etc.). This will depend on the LLM's ability
     to generate structured text and access relevant data.
     """
-    client = _get_interface_llm_client()
-    prompt = (
-        f"Provide a fundamental analysis for the stock ticker {ticker}, considering information available up to {curr_date}. "
-        f"Include key metrics such as P/E ratio, P/S ratio, cash flow insights, and recent earnings performance if available. "
-        f"Present this information in a clear, structured format, ideally as a table or itemized list. "
-        f"If you have access to real-time or very recent financial data, please use it. Otherwise, base your analysis on your general knowledge up to your last training cut-off."
-    )
-    model_name = _interface_component_config.get('model', client.model_name)
-    temperature = _interface_component_config.get('temperature', 0.5)
-    max_tokens = _interface_component_config.get('max_tokens', 1500)
+    client, comp_config, prompt_config = _get_interface_llm_client_and_configs()
+
+    context_vars = {
+        "ticker": ticker,
+        "curr_date": curr_date,
+        "time_window": "the month before up to the month of the current date", # Example phrasing
+        "key_metrics": "P/E ratio, P/S ratio, cash flow insights, recent earnings performance"
+    }
+
+    if not prompt_config or not prompt_config.get('user_prompt_template'):
+        logger.error(f"InterfaceFunctions (get_llm_generated_fundamentals): Prompt config or user_template missing. Config: {prompt_config}")
+        user_prompt_for_call = (
+             f"Provide a fundamental analysis for the stock ticker {ticker}, considering information available up to {curr_date}. "
+             f"Include key metrics such as P/E ratio, P/S ratio, cash flow insights, and recent earnings performance if available. "
+             f"Present this information in a clear, structured format, ideally as a table or itemized list."
+        )
+        full_prompt = f"{prompt_config.get('system_prompt', '')}\n\n{user_prompt_for_call}".strip()
+    else:
+        full_prompt = format_prompt_from_loader(prompt_config, context_vars)
+
+    if not full_prompt.strip():
+        logger.error("InterfaceFunctions (get_llm_generated_fundamentals): Formatted prompt is empty.")
+        return f"Error: Could not generate prompt for fundamentals of {ticker}."
+
+    model_name = comp_config.get('model', client.model_name)
+    temperature = comp_config.get('temperature', 0.5)
+    max_tokens = comp_config.get('max_tokens', 1500)
 
     try:
         logger.info(f"InterfaceFunctions (get_llm_generated_fundamentals): Calling LLM. Model: {model_name}, Temp: {temperature}, MaxTokens: {max_tokens}")
         response_text = client.generate_text(
-            prompt,
+            full_prompt,
             model=model_name,
             temperature=temperature,
             max_tokens=max_tokens
