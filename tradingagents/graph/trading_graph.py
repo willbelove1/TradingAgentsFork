@@ -6,11 +6,8 @@ import json
 from datetime import date
 from typing import Dict, Any, Tuple, List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from langgraph.prebuilt import ToolNode
+from tradingagents.llm_client import LLMClientFactory
 
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -37,6 +34,7 @@ class TradingAgentsGraph:
         selected_analysts=["market", "social", "news", "fundamentals"],
         debug=False,
         config: Dict[str, Any] = None,
+        profile: str = None, # Added profile argument
     ):
         """Initialize the trading agents graph and components.
 
@@ -44,9 +42,11 @@ class TradingAgentsGraph:
             selected_analysts: List of analyst types to include
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
+            profile: Model profile to use ('fast', 'deep', or None for default).
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
+        self.profile = profile
 
         # Update the interface's config
         set_config(self.config)
@@ -57,18 +57,73 @@ class TradingAgentsGraph:
             exist_ok=True,
         )
 
-        # Initialize LLMs
-        if self.config["llm_provider"].lower() == "openai" or self.config["llm_provider"] == "ollama" or self.config["llm_provider"] == "openrouter":
-            self.deep_thinking_llm = ChatOpenAI(model=self.config["deep_think_llm"], base_url=self.config["backend_url"])
-            self.quick_thinking_llm = ChatOpenAI(model=self.config["quick_think_llm"], base_url=self.config["backend_url"])
-        elif self.config["llm_provider"].lower() == "anthropic":
-            self.deep_thinking_llm = ChatAnthropic(model=self.config["deep_think_llm"], base_url=self.config["backend_url"])
-            self.quick_thinking_llm = ChatAnthropic(model=self.config["quick_think_llm"], base_url=self.config["backend_url"])
-        elif self.config["llm_provider"].lower() == "google":
-            self.deep_thinking_llm = ChatGoogleGenerativeAI(model=self.config["deep_think_llm"])
-            self.quick_thinking_llm = ChatGoogleGenerativeAI(model=self.config["quick_think_llm"])
-        else:
-            raise ValueError(f"Unsupported LLM provider: {self.config['llm_provider']}")
+        # Initialize LLMs using the factory
+        llm_factory = LLMClientFactory(self.config)
+        # Ensure your config has "deep_think_llm_key" and "quick_think_llm_key"
+        # or adjust LLMClientFactory to use default keys like "deep_think_llm"
+        # The factory's get_llm method expects the actual model name key.
+        # The convenience methods get_deep_thinking_llm and get_quick_thinking_llm use
+        # config keys "deep_think_llm_key" (defaulting to "deep_think_llm") and
+        # "quick_think_llm_key" (defaulting to "quick_think_llm") to find the *actual model name*.
+
+        # Let's adjust TradingAgentsGraph to pass the correct keys if they are different,
+        # or rely on the defaults in LLMClientFactory.
+        # The config structure is self.config["deep_think_llm"] = "model-name-a"
+        # and self.config["quick_think_llm"] = "model-name-b".
+        # The LLMClientFactory.get_llm expects a key that *points* to the model name.
+        # So, we need to pass "deep_think_llm" (the key) not self.config["deep_think_llm"] (the value).
+
+        # Determine model names based on profile
+        # These are placeholders; actual model names would depend on the provider and specific SKUs
+        # For example, for OpenAI: fast_model="gpt-3.5-turbo", deep_model="gpt-4"
+        # For Google: fast_model="gemini-flash", deep_model="gemini-pro"
+        # The config should ideally store these mappings, e.g. self.config["profiles"]["fast"]["quick_think_llm"]
+        # For now, hardcoding logic based on common Gemini names for illustration.
+        # User should ensure their config["llm_provider"] matches the models chosen here.
+
+        provider = self.config.get("llm_provider", "").lower()
+
+        if self.profile == "fast":
+            # For 'google' provider
+            general_deep_model_name = "gemini-1.0-pro" # Using 1.0 pro as flash might be too weak for deep
+            general_quick_model_name = "gemini-1.0-pro" # Or gemini-flash if available and suitable
+            trader_model_name = "gemini-1.0-pro"
+            researcher_clarify_model_name = "gemini-1.0-pro"
+            if provider == "openai":
+                general_deep_model_name = self.config.get("quick_think_llm", "gpt-3.5-turbo") # Use quick as deep for fast
+                general_quick_model_name = self.config.get("quick_think_llm", "gpt-3.5-turbo")
+                trader_model_name = self.config.get("quick_think_llm", "gpt-3.5-turbo")
+                researcher_clarify_model_name = self.config.get("quick_think_llm", "gpt-3.5-turbo")
+        elif self.profile == "deep":
+            # For 'google' provider
+            general_deep_model_name = "gemini-pro"
+            general_quick_model_name = "gemini-1.0-pro" # Or gemini-flash
+            trader_model_name = "gemini-pro"
+            researcher_clarify_model_name = "gemini-1.0-pro" # Researcher (clarifier) uses a quicker model
+            if provider == "openai":
+                general_deep_model_name = self.config.get("deep_think_llm", "gpt-4")
+                general_quick_model_name = self.config.get("quick_think_llm", "gpt-3.5-turbo")
+                trader_model_name = self.config.get("deep_think_llm", "gpt-4") # Trader uses deep model
+                researcher_clarify_model_name = self.config.get("quick_think_llm", "gpt-3.5-turbo")
+        else: # Default behavior: use models directly from config
+            self.deep_thinking_llm = llm_factory.get_llm(model_type="deep_think_llm")
+            self.quick_thinking_llm = llm_factory.get_llm(model_type="quick_think_llm")
+            # For trader and researcher, if not using profiles, they might default to quick_thinking_llm in GraphSetup
+            # or we need specific config keys for them.
+            # With the new get_llm_by_name, it's better to be explicit.
+            # So, even for default, let's define them to ensure they are created.
+            # These would ideally also come from config if not for profiles.
+            default_trader_model = self.config.get("trader_llm_model", self.config.get("deep_think_llm"))
+            default_researcher_model = self.config.get("researcher_llm_model", self.config.get("quick_think_llm"))
+
+            self.trader_llm = llm_factory.get_llm_by_name(default_trader_model)
+            self.researcher_clarify_llm = llm_factory.get_llm_by_name(default_researcher_model)
+
+        if self.profile in ["fast", "deep"]:
+            self.deep_thinking_llm = llm_factory.get_llm_by_name(general_deep_model_name)
+            self.quick_thinking_llm = llm_factory.get_llm_by_name(general_quick_model_name)
+            self.trader_llm = llm_factory.get_llm_by_name(trader_model_name)
+            self.researcher_clarify_llm = llm_factory.get_llm_by_name(researcher_clarify_model_name)
         
         self.toolkit = Toolkit(config=self.config)
 
@@ -95,6 +150,8 @@ class TradingAgentsGraph:
             self.invest_judge_memory,
             self.risk_manager_memory,
             self.conditional_logic,
+            trader_llm=self.trader_llm,  # Pass the specific trader LLM
+            researcher_clarify_llm=self.researcher_clarify_llm # Pass the specific researcher LLM
         )
 
         self.propagator = Propagator()

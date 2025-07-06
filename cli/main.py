@@ -417,6 +417,8 @@ def get_user_selections():
     console.print(Align.center(welcome_box))
     console.print()  # Add a blank line after the welcome box
 
+    user_selections = {} # Initialize dict to store selections
+
     # Create a boxed questionnaire for each step
     def create_question_box(title, prompt, default=None):
         box_content = f"[bold]{title}[/bold]\n"
@@ -491,6 +493,29 @@ def get_user_selections():
         "deep_thinker": selected_deep_thinker,
     }
 
+    # If a profile is selected, these specific thinker selections might be overridden
+    # by TradingAgentsGraph, but we collect them anyway for the config.
+    # Or, we can skip asking if a profile is provided.
+    if not profile: # Only ask if no profile is specified
+        console.print(
+            create_question_box(
+                "Step 6: Thinking Agents", "Select your thinking agents for analysis"
+            )
+        )
+        user_selections["shallow_thinker"] = select_shallow_thinking_agent(user_selections["llm_provider"])
+        user_selections["deep_thinker"] = select_deep_thinking_agent(user_selections["llm_provider"])
+    else:
+        # If profile is set, we can assign placeholders or skip these keys,
+        # as TradingAgentsGraph will use its profile-based logic.
+        # For consistency in the 'selections' dict, let's add them as None or default.
+        # The DEFAULT_CONFIG provides defaults, TradingAgentGraph will override them if profile is active.
+        user_selections["shallow_thinker"] = DEFAULT_CONFIG.get("quick_think_llm")
+        user_selections["deep_thinker"] = DEFAULT_CONFIG.get("deep_think_llm")
+        console.print(f"\n[bold yellow]Using '{profile}' profile. Specific LLM agent selections will be determined by the profile.[/bold yellow]")
+
+
+    return user_selections
+
 
 def get_ticker():
     """Get ticker symbol from user input."""
@@ -519,6 +544,11 @@ def get_analysis_date():
 def display_complete_report(final_state):
     """Display the complete analysis report with team-based panels."""
     console.print("\n[bold green]Complete Analysis Report[/bold green]\n")
+
+def get_user_selections(profile: Optional[str] = None): # Added profile argument
+    """Get all user selections before starting the analysis display."""
+    # Display ASCII art welcome message
+    with open("./cli/static/welcome.txt", "r") as f:
 
     # I. Analyst Team Reports
     analyst_reports = []
@@ -731,9 +761,10 @@ def extract_content_string(content):
     else:
         return str(content)
 
-def run_analysis():
-    # First get all user selections
-    selections = get_user_selections()
+# Update signature to accept profile
+def run_analysis(profile: Optional[str] = None):
+    # First get all user selections, passing profile
+    selections = get_user_selections(profile=profile)
 
     # Create config with selected research depth
     config = DEFAULT_CONFIG.copy()
@@ -746,7 +777,10 @@ def run_analysis():
 
     # Initialize the graph
     graph = TradingAgentsGraph(
-        [analyst.value for analyst in selections["analysts"]], config=config, debug=True
+        selected_analysts=[analyst.value for analyst in selections["analysts"]],
+        config=config,
+        debug=True,
+        profile=profile # Pass the profile to the graph
     )
 
     # Create result directory
@@ -1097,8 +1131,22 @@ def run_analysis():
 
 
 @app.command()
-def analyze():
-    run_analysis()
+def analyze(
+    profile: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="Model profile to use ('fast' or 'deep'). Overrides individual LLM selections if provided."
+    )
+):
+    """
+    Run the TradingAgents analysis for a selected ticker and date.
+    Prompts for configuration if not overridden by CLI options.
+    """
+    if profile and profile not in ["fast", "deep"]:
+        console.print(f"[red]Error: Invalid profile '{profile}'. Choose 'fast' or 'deep'.[/red]")
+        raise typer.Exit(code=1)
+
+    run_analysis(profile=profile) # Pass profile to run_analysis
 
 
 if __name__ == "__main__":

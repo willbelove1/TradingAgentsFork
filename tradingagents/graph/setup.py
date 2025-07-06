@@ -27,10 +27,14 @@ class GraphSetup:
         invest_judge_memory,
         risk_manager_memory,
         conditional_logic: ConditionalLogic,
+        trader_llm: Any = None, # Added trader_llm
+        researcher_clarify_llm: Any = None, # Added researcher_clarify_llm
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
+        self.trader_llm = trader_llm if trader_llm else quick_thinking_llm # Default to quick if not provided
+        self.researcher_clarify_llm = researcher_clarify_llm if researcher_clarify_llm else quick_thinking_llm # Default to quick
         self.toolkit = toolkit
         self.tool_nodes = tool_nodes
         self.bull_memory = bull_memory
@@ -142,15 +146,15 @@ class GraphSetup:
             report = state.get("investment_plan")
             # The new trader_node updates state internally and returns a dict that langgraph merges.
             # It needs llm_client and prompt_cfg.
-            # Using quick_thinking_llm for now as the llm_client.
-            return new_trader_node_logic(report, state, self.quick_thinking_llm, self.prompt_cfg_trader)
+            # Using self.trader_llm now.
+            return new_trader_node_logic(report, state, self.trader_llm, self.prompt_cfg_trader)
 
         def researcher_clarify_node_wrapper(state: AgentState):
             # researcher_node expects input_data (not strictly used if question is from state), state, llm_client, prompt_cfg
             # The question is in state["clarification_question"]
-            # Using quick_thinking_llm for researcher as well (gemini-flash mapping).
+            # Using self.researcher_clarify_llm now.
             # input_data is not strictly needed by researcher_node as it reads question from state.
-            return new_researcher_node_logic(None, state, self.quick_thinking_llm, self.prompt_cfg_researcher)
+            return new_researcher_node_logic(None, state, self.researcher_clarify_llm, self.prompt_cfg_researcher)
 
         # Create risk analysis nodes
         risky_analyst = create_risky_debator(self.quick_thinking_llm)
