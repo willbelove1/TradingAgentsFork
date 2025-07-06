@@ -1,15 +1,16 @@
 # TradingAgents/graph/reflection.py
 
 from typing import Dict, Any
-from langchain_google_genai import ChatGoogleGenerativeAI
-
+# Remove direct ChatModel import, will use BaseLLMClient
+# from langchain_google_genai import ChatGoogleGenerativeAI
+from tradingagents.llm_clients import BaseLLMClient # Import BaseLLMClient
 
 class Reflector:
     """Handles reflection on decisions and updating memory."""
 
-    def __init__(self, quick_thinking_llm: ChatGoogleGenerativeAI):
-        """Initialize the reflector with an LLM."""
-        self.quick_thinking_llm = quick_thinking_llm
+    def __init__(self, llm_client: BaseLLMClient): # Changed parameter type
+        """Initialize the reflector with an LLM client."""
+        self.llm_client = llm_client # Store the client
         self.reflection_system_prompt = self._get_reflection_prompt()
 
     def _get_reflection_prompt(self) -> str:
@@ -59,15 +60,25 @@ Adhere strictly to these instructions, and ensure your output is detailed, accur
         self, component_type: str, report: str, situation: str, returns_losses
     ) -> str:
         """Generate reflection for a component."""
-        messages = [
-            ("system", self.reflection_system_prompt),
-            (
-                "human",
-                f"Returns: {returns_losses}\n\nAnalysis/Decision: {report}\n\nObjective Market Reports for Reference: {situation}",
-            ),
-        ]
+        # Construct a single prompt string for generate_text
+        # The system prompt can be prepended or incorporated into the user prompt.
+        # For simplicity here, we'll prepend it.
+        full_prompt = f"{self.reflection_system_prompt}\n\n" \
+                      f"Component Type: {component_type}\n" \
+                      f"Returns/Losses: {returns_losses}\n\n" \
+                      f"Analysis/Decision Provided: {report}\n\n" \
+                      f"Objective Market Reports for Reference:\n{situation}\n\n" \
+                      f"Based on all the above, provide your step-by-step analysis, improvement suggestions, summary, and query."
 
-        result = self.quick_thinking_llm.invoke(messages).content
+        # Using the llm_client's generate_text method
+        # We might need to adjust temperature or max_tokens if necessary,
+        # or pass them from a config if they vary per reflection type.
+        # The llm_client's config should have a default model, or it can be specified here.
+        result = self.llm_client.generate_text(
+            prompt=full_prompt,
+            temperature=0.5, # Example temperature, can be configured
+            max_tokens=2048   # Example max_tokens, ensure it's adequate
+        )
         return result
 
     def reflect_bull_researcher(self, current_state, returns_losses, bull_memory):

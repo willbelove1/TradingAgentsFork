@@ -12,10 +12,41 @@ import os
 import pandas as pd
 from tqdm import tqdm
 import yfinance as yf
-import google.generativeai as genai
-import os
+# import google.generativeai as genai # No longer needed directly here
+# import os # os is still used elsewhere, but not for genai key specifically here
 from .config import get_config, set_config, DATA_DIR
+from tradingagents.llm_clients import BaseLLMClient, get_llm_client # Import client infrastructure
+from tradingagents.llm_clients.base_client import logger # For logging
+from typing import Optional
 
+# Global LLM client for interface functions - initialized on first use or can be set externally.
+# This is one way to manage it; another is to pass client to each function.
+# For simplicity in refactoring existing functions, a module-level client can be easier.
+_interface_llm_client: Optional[BaseLLMClient] = None
+
+def _get_interface_llm_client() -> BaseLLMClient:
+    """Initializes or returns the module-level LLM client."""
+    global _interface_llm_client
+    if _interface_llm_client is None:
+        logger.info("Initializing module-level LLM client for dataflows.interface")
+        config = get_config()
+        client_config = config.copy()
+        if 'model' not in client_config:
+            client_config['model'] = config.get('default_model', 'gemini-pro' if config.get('llm_provider') == 'google' else 'gpt-3.5-turbo')
+        if 'embedding_model' not in client_config: # Not used by these text-gen funcs but good for consistency
+            client_config['embedding_model'] = config.get('embedding_model', 'models/embedding-001' if config.get('llm_provider') == 'google' else 'text-embedding-ada-002')
+        if config.get('llm_provider', '').lower() == 'openai' and 'openai_base_url' in config:
+            client_config['base_url'] = config['openai_base_url']
+            if 'openai_api_key' in config:
+                 client_config['api_key'] = config['openai_api_key']
+        _interface_llm_client = get_llm_client(config=client_config)
+    return _interface_llm_client
+
+def set_interface_llm_client(client: BaseLLMClient):
+    """Allows setting the LLM client externally, e.g., from TradingAgentsGraph."""
+    global _interface_llm_client
+    logger.info(f"External LLM client set for dataflows.interface: {client.__class__.__name__}")
+    _interface_llm_client = client
 
 def get_finnhub_news(
     ticker: Annotated[
@@ -703,199 +734,77 @@ def get_YFin_data(
     return filtered_data
 
 
-def get_stock_news_openai(ticker, curr_date): # Renaming to get_stock_news_llm or similar might be good in future
-    config = get_config()
-    llm_provider = config.get("llm_provider", "openai").lower()
+# It's better to rename these functions to reflect they are LLM-based, not provider-specific.
+# e.g., get_llm_generated_stock_news, get_llm_generated_global_news, get_llm_generated_fundamentals
 
-    if llm_provider == "google":
-        if not os.getenv("GOOGLE_API_KEY"):
-            try:
-                from dotenv import load_dotenv
-                load_dotenv()
-                if not os.getenv("GOOGLE_API_KEY"):
-                    raise ValueError("GOOGLE_API_KEY not found for Google provider in interface.")
-            except ImportError:
-                raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in interface.")
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        model = genai.GenerativeModel(config["quick_think_llm"])
-        prompt = f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period."
-        # Note: Google's Gemini API doesn't have a direct equivalent to OpenAI's `tools` like `web_search_preview` in the same structured way.
-        # This will be a plain text generation call.
-        # For search capabilities, one would typically integrate a separate search API or use Vertex AI Search.
-        response = model.generate_content(prompt)
-        return response.text
-    else: # OpenAI or compatible
-        from openai import OpenAI # Conditional import
-        client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
-        # The following OpenAI-specific tool usage might not work with all OpenRouter/Ollama models.
-        # It's kept for OpenAI provider.
-        try:
-            response = client.responses.create( # This API seems to be specific to certain OpenAI models or a beta feature.
-                model=config["quick_think_llm"],
-                input=[
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period.",
-                            }
-                        ],
-                    }
-                ],
-                text={"format": {"type": "text"}},
-                reasoning={},
-                tools=[
-                    {
-                        "type": "web_search_preview",
-                        "user_location": {"type": "approximate"},
-                        "search_context_size": "low",
-                    }
-                ],
-                temperature=1,
-                max_output_tokens=4096,
-                top_p=1,
-                store=True,
-            )
-            return response.output[1].content[0].text
-        except Exception as e:
-            # Fallback to a standard chat completion if the .responses API fails (e.g. for Ollama)
-            print(f"OpenAI .responses.create failed ({e}), falling back to chat.completions.create for get_stock_news_openai")
-            completion = client.chat.completions.create(
-                model=config["quick_think_llm"],
-                messages=[
-                    {"role": "system", "content": "You are a helpful financial assistant."},
-                    {"role": "user", "content": f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period."}
-                ],
-                temperature=0.7,
-                max_tokens=1500
-            )
-            return completion.choices[0].message.content
+def get_llm_generated_stock_news(ticker: str, curr_date: str) -> str:
+    """
+    Generates stock news summary using the configured LLM.
+    Note: This function previously used OpenAI's tool-based search.
+    The refactored version will use plain text generation.
+    For actual web search, a separate search tool/API integration would be needed.
+    """
+    client = _get_interface_llm_client()
+    # The prompt needs to be designed for pure text generation based on the LLM's knowledge,
+    # or it implies the LLM itself has web search capabilities (like some versions of Gemini or ChatGPT with browsing).
+    # The original prompt implied a search action. We'll rephrase for general knowledge retrieval if not a search-enabled model.
+    prompt = (
+        f"Provide a summary of significant news or discussions related to the stock ticker {ticker} "
+        f"that occurred in the 7 days leading up to {curr_date}. Focus on information relevant to trading decisions. "
+        f"If you have access to real-time or very recent information, please use it. Otherwise, base your summary on your general knowledge up to your last training cut-off."
+    )
+
+    # Model name can be specified if we want to use a different one from client's default
+    # e.g., client.config.get('quick_think_llm_model_name') or a hardcoded one.
+    # For now, it uses the client's default model (likely from 'default_model' in config).
+    try:
+        response_text = client.generate_text(prompt, temperature=0.7, max_tokens=1024)
+        return response_text
+    except Exception as e:
+        logger.error(f"Error in get_llm_generated_stock_news for {ticker} on {curr_date}: {e}")
+        return f"Error generating stock news for {ticker}: {str(e)}"
 
 
-def get_global_news_openai(curr_date): # Renaming to get_global_news_llm or similar might be good in future
-    config = get_config()
-    llm_provider = config.get("llm_provider", "openai").lower()
+def get_llm_generated_global_news(curr_date: str) -> str:
+    """
+    Generates global/macroeconomics news summary using the configured LLM.
+    Similar caveats as above regarding actual web search vs. knowledge retrieval.
+    """
+    client = _get_interface_llm_client()
+    prompt = (
+        f"Summarize key global or macroeconomic news events from the 7 days prior to {curr_date} "
+        f"that would be informative for financial trading purposes. "
+        f"If you have access to real-time or very recent information, please use it. Otherwise, base your summary on your general knowledge up to your last training cut-off."
+    )
+    try:
+        response_text = client.generate_text(prompt, temperature=0.7, max_tokens=1024)
+        return response_text
+    except Exception as e:
+        logger.error(f"Error in get_llm_generated_global_news for {curr_date}: {e}")
+        return f"Error generating global news for {curr_date}: {str(e)}"
 
-    if llm_provider == "google":
-        if not os.getenv("GOOGLE_API_KEY"): # Repeated check, could be refactored
-            try:
-                from dotenv import load_dotenv
-                load_dotenv()
-                if not os.getenv("GOOGLE_API_KEY"):
-                    raise ValueError("GOOGLE_API_KEY not found for Google provider in interface.")
-            except ImportError:
-                raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in interface.")
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        model = genai.GenerativeModel(config["quick_think_llm"])
-        prompt = f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period."
-        response = model.generate_content(prompt)
-        return response.text
-    else: # OpenAI or compatible
-        from openai import OpenAI # Conditional import
-        client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
-        try:
-            response = client.responses.create(
-                model=config["quick_think_llm"],
-                input=[
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period.",
-                            }
-                        ],
-                    }
-                ],
-                text={"format": {"type": "text"}},
-                reasoning={},
-                tools=[
-                    {
-                        "type": "web_search_preview",
-                        "user_location": {"type": "approximate"},
-                        "search_context_size": "low",
-                    }
-                ],
-                temperature=1,
-                max_output_tokens=4096,
-                top_p=1,
-                store=True,
-            )
-            return response.output[1].content[0].text
-        except Exception as e:
-            print(f"OpenAI .responses.create failed ({e}), falling back to chat.completions.create for get_global_news_openai")
-            completion = client.chat.completions.create(
-                model=config["quick_think_llm"],
-                messages=[
-                    {"role": "system", "content": "You are a helpful financial assistant."},
-                    {"role": "user", "content": f"Can you search global or macroeconomics news from 7 days before {curr_date} to {curr_date} that would be informative for trading purposes? Make sure you only get the data posted during that period."}
-                ],
-                temperature=0.7,
-                max_tokens=1500
-            )
-            return completion.choices[0].message.content
+def get_llm_generated_fundamentals(ticker: str, curr_date: str) -> str:
+    """
+    Generates fundamental analysis discussion for a stock using the configured LLM.
+    The original prompt asked for a table (PE/PS/Cash flow etc.). This will depend on the LLM's ability
+    to generate structured text and access relevant data.
+    """
+    client = _get_interface_llm_client()
+    prompt = (
+        f"Provide a fundamental analysis for the stock ticker {ticker}, considering information available up to {curr_date}. "
+        f"Include key metrics such as P/E ratio, P/S ratio, cash flow insights, and recent earnings performance if available. "
+        f"Present this information in a clear, structured format, ideally as a table or itemized list. "
+        f"If you have access to real-time or very recent financial data, please use it. Otherwise, base your analysis on your general knowledge up to your last training cut-off."
+    )
+    try:
+        response_text = client.generate_text(prompt, temperature=0.5, max_tokens=1500) # More tokens for potentially structured output
+        return response_text
+    except Exception as e:
+        logger.error(f"Error in get_llm_generated_fundamentals for {ticker} on {curr_date}: {e}")
+        return f"Error generating fundamentals for {ticker}: {str(e)}"
 
-
-def get_fundamentals_openai(ticker, curr_date): # Renaming to get_fundamentals_llm or similar might be good in future
-    config = get_config()
-    llm_provider = config.get("llm_provider", "openai").lower()
-
-    if llm_provider == "google":
-        if not os.getenv("GOOGLE_API_KEY"): # Repeated check
-            try:
-                from dotenv import load_dotenv
-                load_dotenv()
-                if not os.getenv("GOOGLE_API_KEY"):
-                    raise ValueError("GOOGLE_API_KEY not found for Google provider in interface.")
-            except ImportError:
-                raise ValueError("dotenv package not installed. Please install it or set GOOGLE_API_KEY for Google provider in interface.")
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        model = genai.GenerativeModel(config["quick_think_llm"])
-        prompt = f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc"
-        response = model.generate_content(prompt)
-        return response.text
-    else: # OpenAI or compatible
-        from openai import OpenAI # Conditional import
-        client = OpenAI(base_url=config.get("backend_url", "https://api.openai.com/v1"))
-        try:
-            response = client.responses.create(
-                model=config["quick_think_llm"],
-                input=[
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc",
-                            }
-                        ],
-                    }
-                ],
-                text={"format": {"type": "text"}},
-                reasoning={},
-                tools=[
-                    {
-                        "type": "web_search_preview",
-                        "user_location": {"type": "approximate"},
-                        "search_context_size": "low",
-                    }
-                ],
-                temperature=1,
-                max_output_tokens=4096,
-                top_p=1,
-                store=True,
-            )
-            return response.output[1].content[0].text
-        except Exception as e:
-            print(f"OpenAI .responses.create failed ({e}), falling back to chat.completions.create for get_fundamentals_openai")
-            completion = client.chat.completions.create(
-                model=config["quick_think_llm"],
-                messages=[
-                    {"role": "system", "content": "You are a helpful financial assistant."},
-                    {"role": "user", "content": f"Can you search Fundamental for discussions on {ticker} during of the month before {curr_date} to the month of {curr_date}. Make sure you only get the data posted during that period. List as a table, with PE/PS/Cash flow/ etc"}
-                ],
-                temperature=0.7,
-                max_tokens=1500
-            )
-            return completion.choices[0].message.content
+# IMPORTANT: The old function names get_stock_news_openai, get_global_news_openai, get_fundamentals_openai
+# are still referenced in `tradingagents/agents/utils/agent_utils.py` and `tradingagents/graph/trading_graph.py` (in _create_tool_nodes).
+# These references need to be updated to the new names:
+# get_llm_generated_stock_news, get_llm_generated_global_news, get_llm_generated_fundamentals.
+# This change will be done in the next step when refactoring those files.
