@@ -3,12 +3,25 @@
 # from langchain_google_genai import ChatGoogleGenerativeAI # Remove direct ChatModel import
 from tradingagents.llm_clients import BaseLLMClient # Import BaseLLMClient
 
+from typing import Dict # Added for type hinting
+
 class SignalProcessor:
     """Processes trading signals to extract actionable decisions."""
 
-    def __init__(self, llm_client: BaseLLMClient): # Changed parameter type
-        """Initialize with an LLM client for processing."""
-        self.llm_client = llm_client # Store the client
+    def __init__(self, llm_client: BaseLLMClient, component_config: Dict = None):
+        """
+        Initialize with an LLM client and component-specific configuration.
+        Args:
+            llm_client (BaseLLMClient): The LLM client instance.
+            component_config (Dict, optional): Configuration for this component.
+        """
+        self.llm_client = llm_client
+        self.component_config = component_config if component_config else {}
+        # Potentially override default model from llm_client if specified in component_config
+        self.model_name = self.component_config.get('model', self.llm_client.model_name)
+        self.temperature = self.component_config.get('temperature', 0.1) # Default from previous hardcoding
+        self.max_tokens = self.component_config.get('max_tokens', 25)    # Default from previous hardcoding, was 10, increased to 25
+
 
     def process_signal(self, full_signal: str) -> str:
         """
@@ -25,13 +38,15 @@ class SignalProcessor:
         # Construct a single prompt string for generate_text
         full_prompt = f"{system_prompt}\n\nFinancial Report/Signal:\n{full_signal}\n\nExtracted Decision (SELL, BUY, or HOLD):"
 
-        # Using the llm_client's generate_text method
-        # A lower temperature might be better for this kind of extraction task.
-        # Max tokens can be small as we expect a single word.
+        # Using the llm_client's generate_text method with model and parameters from component_config
+        from tradingagents.llm_clients.base_client import logger as client_logger
+        client_logger.info(f"SignalProcessor: Calling LLM. Model: {self.model_name}, Temperature: {self.temperature}, Max Tokens: {self.max_tokens}")
+
         extracted_decision = self.llm_client.generate_text(
             prompt=full_prompt,
-            temperature=0.1, # Low temperature for deterministic output
-            max_tokens=10      # Small max_tokens for a single word
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens
         ).strip().upper()
 
         # Validate the output to ensure it's one of the expected decisions

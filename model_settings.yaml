@@ -1,0 +1,118 @@
+# Configuration for LLM provider and specific models for agents/components
+
+# Overall LLM provider ("google", "openai", "anthropic", etc.)
+# This will determine which client (GeminiClient, OpenAIClient) is primarily used.
+llm_provider: "google"
+
+# --- Default model names for the selected provider ---
+# These are used if a specific model is not defined for an agent/component below.
+# For Google (Gemini):
+default_text_model: "gemini-1.5-flash" # Fast and capable for general tasks
+default_embedding_model: "models/embedding-001"
+default_image_model: "gemini-1.5-flash" # For potential vision capabilities
+
+# For OpenAI:
+# default_text_model: "gpt-3.5-turbo"
+# default_embedding_model: "text-embedding-3-small"
+# default_image_model: "gpt-4-vision-preview"
+
+# --- OpenAI Specific Configuration (for OpenAI provider or OpenAI-compatible servers like Ollama) ---
+# If llm_provider is "openai" and these are set, they will be used by OpenAIClient.
+# For official OpenAI, keep these null or comment out.
+openai_base_url: null # Example for Ollama: "http://localhost:11434/v1"
+openai_api_key: null  # Example for Ollama: "ollama" (or any string, as Ollama doesn't usually require a key)
+
+# --- Agent/Component Specific Model Configurations ---
+# Allows overriding the default models and setting other generation parameters.
+
+# These keys will be used in TradingAgentsGraph to instantiate the correct Langchain ChatModels
+# The actual model names for these keys are defined below under 'langchain_chat_models'
+langchain_quick_thinker_key: "quick_llm_lc"
+langchain_deep_thinker_key: "deep_llm_lc"
+
+# Define the actual models for the Langchain ChatModel instances
+# These names should match valid model names for the chosen llm_provider
+langchain_chat_models:
+  quick_llm_lc: # Name for the "quick thinker" Langchain ChatModel instance
+    # For Google:
+    model_name: "gemini-1.5-flash"
+    # For OpenAI:
+    # model_name: "gpt-3.5-turbo"
+  deep_llm_lc: # Name for the "deep thinker" Langchain ChatModel instance
+    # For Google:
+    model_name: "gemini-1.0-pro" # More robust model for deeper analysis
+    # For OpenAI:
+    # model_name: "gpt-4"
+
+
+agent_model_configs:
+  # Langchain-based Agents - they will use one of the ChatModel instances defined above.
+  # The 'llm_instance_key' refers to a key in 'langchain_chat_models'.
+  MarketAnalyst:
+    llm_instance_key: "quick_llm_lc"
+  SocialMediaAnalyst:
+    llm_instance_key: "quick_llm_lc"
+  NewsAnalyst:
+    llm_instance_key: "quick_llm_lc"
+  FundamentalsAnalyst:
+    llm_instance_key: "quick_llm_lc"
+
+  BullResearcher:
+    llm_instance_key: "quick_llm_lc"
+  BearResearcher:
+    llm_instance_key: "quick_llm_lc"
+  ResearchManager: # Judge for research debate
+    llm_instance_key: "deep_llm_lc"
+
+  Trader:
+    llm_instance_key: "quick_llm_lc"
+
+  RiskyDebator:
+    llm_instance_key: "quick_llm_lc"
+  NeutralDebator:
+    llm_instance_key: "quick_llm_lc"
+  SafeDebator:
+    llm_instance_key: "quick_llm_lc"
+  RiskManager: # Judge for risk debate
+    llm_instance_key: "deep_llm_lc"
+
+  # Components using BaseLLMClient directly
+  # These can specify model name and generation parameters directly.
+  # If 'model' is not specified, the 'default_text_model' for the provider will be used.
+  Reflector:
+    model: "gemini-1.0-pro" # Using a more robust model for reflection tasks
+    temperature: 0.6
+    max_tokens: 2048
+  SignalProcessor:
+    model: "gemini-1.5-flash" # Fast model for simple extraction
+    temperature: 0.1
+    max_tokens: 25 # Slightly increased for safety, expecting BUY/SELL/HOLD
+
+  FinancialSituationMemory:
+    # This component primarily uses embeddings. The embedding model is taken from
+    # 'default_embedding_model' or can be overridden in the BaseLLMClient's config.
+    # If an override is needed specifically for this component, it could be:
+    embedding_model_override: null # Example: "models/embedding-custom"
+    # No text generation parameters needed unless it starts generating text.
+
+  InterfaceFunctions: # For LLM calls made directly from dataflows/interface.py
+    model: "gemini-1.5-flash" # Fast model for news summarization etc.
+    temperature: 0.7
+    max_tokens: 1024
+
+# --- Round Styles (Conceptual for now) ---
+# "Quick" vs "Slow" round styles will primarily be implemented by choosing
+# different models (e.g., Flash vs Pro/Ultra) for agents involved in those rounds,
+# as configured above in `agent_model_configs`.
+# Additional parameters like prompt variations or iteration depth for debates
+# could be added here in the future if needed.
+# Example:
+# research_debate_config:
+#   quick_round_model: "gemini-1.5-flash"
+#   slow_round_model: "gemini-1.0-pro"
+#   iteration_depth: 3
+# risk_discussion_config:
+#   default_model: "gemini-1.0-pro"
+
+# This file should be placed in the root directory or a dedicated 'config/' directory.
+# Ensure PyYAML is installed to parse this file.

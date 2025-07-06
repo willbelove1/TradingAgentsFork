@@ -58,56 +58,54 @@ class TradingAgentsGraph:
             exist_ok=True,
         )
 
-        # Initialize LLM Client using the factory
-        # The factory will internally handle API key loading from env if not directly provided in config
-        # The config passed to get_llm_client should contain 'llm_provider' and model names.
-        client_config = self.config.copy()
-        # Ensure 'model' and 'embedding_model' are set for the client from 'default_model' in main config
-        client_config['model'] = self.config.get('default_model', 'gemini-pro' if self.config.get('llm_provider') == 'google' else 'gpt-3.5-turbo')
-        client_config['embedding_model'] = self.config.get('embedding_model', 'models/embedding-001' if self.config.get('llm_provider') == 'google' else 'text-embedding-ada-002')
-        # For OpenAI compatible clients, pass the base_url if defined
-        if self.config.get('llm_provider', '').lower() == 'openai' and 'openai_base_url' in self.config:
-            client_config['base_url'] = self.config['openai_base_url']
-            # Also pass the api key if specifically set for openai compatible (e.g. "ollama")
-            if 'openai_api_key' in self.config:
-                 client_config['api_key'] = self.config['openai_api_key']
+        # Config now includes merged model_settings.yaml
+        # Initialize BaseLLMClient (used by Reflector, SignalProcessor, Memory, InterfaceFunctions)
+        # The get_llm_client factory will use 'llm_provider', 'default_text_model',
+        # 'default_embedding_model', 'openai_base_url' etc. from self.config
+        self.llm_client = get_llm_client(config=self.config)
 
+        # Initialize Langchain ChatModel instances based on model_settings.yaml
+        # These are for Langchain agents that expect ChatModel objects.
+        lc_provider = self.config.get("llm_provider", "google").lower()
 
-        self.llm_client = get_llm_client(config=client_config)
+        # Get model names for quick and deep thinkers from the YAML structure
+        # (e.g., from self.config['langchain_chat_models']['quick_llm_lc']['model_name'])
+        quick_llm_lc_key = self.config.get('langchain_quick_thinker_key', 'quick_llm_lc')
+        deep_llm_lc_key = self.config.get('langchain_deep_thinker_key', 'deep_llm_lc')
 
-        # --- Retain Langchain ChatModel instances for existing Langchain agent integrations ---
-        # These will still use the 'deep_think_llm' and 'quick_think_llm' from the config.
-        # This is a temporary measure for Giai đoạn 1 to minimize disruption.
-        # Future refactoring could make Langchain agents also use the BaseLLMClient via a wrapper.
-        lc_provider = self.config["llm_provider"].lower()
-        lc_deep_model_name = self.config["deep_think_llm"]
-        lc_quick_model_name = self.config["quick_think_llm"]
+        quick_llm_lc_model_name = self.config.get('langchain_chat_models', {}).get(quick_llm_lc_key, {}).get('model_name')
+        deep_llm_lc_model_name = self.config.get('langchain_chat_models', {}).get(deep_llm_lc_key, {}).get('model_name')
+
+        if not quick_llm_lc_model_name:
+            quick_llm_lc_model_name = self.config.get('default_text_model', 'gemini-1.5-flash') # Fallback
+            print(f"Warning: quick_llm_lc model name not found in model_settings.yaml, using default: {quick_llm_lc_model_name}")
+        if not deep_llm_lc_model_name:
+            deep_llm_lc_model_name = self.config.get('default_text_model', 'gemini-1.0-pro') # Fallback (could be same as default or a more robust one)
+            print(f"Warning: deep_llm_lc model name not found in model_settings.yaml, using default: {deep_llm_lc_model_name}")
 
         if lc_provider == "google":
-            if not os.getenv("GOOGLE_API_KEY"): # Ensure API key is available for Langchain's Google client
+            if not os.getenv("GOOGLE_API_KEY"):
                 try:
                     from dotenv import load_dotenv
                     load_dotenv()
                     if not os.getenv("GOOGLE_API_KEY"):
                         raise ValueError("GOOGLE_API_KEY not found for Langchain Google models.")
-                except ImportError:
+                except ImportError: # pragma: no cover
                     raise ValueError("dotenv not installed. Cannot load GOOGLE_API_KEY for Langchain Google models.")
-            self.deep_thinking_llm_lc = ChatGoogleGenerativeAI(model=lc_deep_model_name)
-            self.quick_thinking_llm_lc = ChatGoogleGenerativeAI(model=lc_quick_model_name)
-        elif lc_provider == "openai" or lc_provider == "ollama" or lc_provider == "openrouter":
-            # Use openai_base_url and openai_api_key from config if they exist, otherwise defaults to OpenAI proper
+            self.quick_thinking_llm_lc = ChatGoogleGenerativeAI(model=quick_llm_lc_model_name)
+            self.deep_thinking_llm_lc = ChatGoogleGenerativeAI(model=deep_llm_lc_model_name)
+        elif lc_provider == "openai": # This now also covers Ollama/OpenRouter if openai_base_url is set
             openai_base_url = self.config.get("openai_base_url")
-            openai_api_key = self.config.get("openai_api_key", os.getenv("OPENAI_API_KEY")) # Fallback to env
-            self.deep_thinking_llm_lc = ChatOpenAI(model=lc_deep_model_name, base_url=openai_base_url, api_key=openai_api_key)
-            self.quick_thinking_llm_lc = ChatOpenAI(model=lc_quick_model_name, base_url=openai_base_url, api_key=openai_api_key)
+            openai_api_key = self.config.get("openai_api_key", os.getenv("OPENAI_API_KEY"))
+            self.quick_thinking_llm_lc = ChatOpenAI(model=quick_llm_lc_model_name, base_url=openai_base_url, api_key=openai_api_key)
+            self.deep_thinking_llm_lc = ChatOpenAI(model=deep_llm_lc_model_name, base_url=openai_base_url, api_key=openai_api_key)
         elif lc_provider == "anthropic":
-            # Anthropic might need ANTHROPIC_API_KEY env var
-            self.deep_thinking_llm_lc = ChatAnthropic(model=lc_deep_model_name) # base_url might be needed if not default
-            self.quick_thinking_llm_lc = ChatAnthropic(model=lc_quick_model_name)
+            # Ensure ANTHROPIC_API_KEY is in env
+            self.quick_thinking_llm_lc = ChatAnthropic(model=quick_llm_lc_model_name)
+            self.deep_thinking_llm_lc = ChatAnthropic(model=deep_llm_lc_model_name)
         else:
             raise ValueError(f"Unsupported LLM provider for Langchain ChatModels: {lc_provider}")
-        # --- End of Langchain ChatModel retention ---
-        
+
         self.toolkit = Toolkit(config=self.config)
 
         # Initialize memories - Pass the llm_client for embeddings
@@ -122,28 +120,36 @@ class TradingAgentsGraph:
 
         # Initialize components
         self.conditional_logic = ConditionalLogic()
-        # Pass Langchain models to GraphSetup for now
+
+        # Pass the specifically configured Langchain ChatModel instances to GraphSetup
         self.graph_setup = GraphSetup(
-            self.quick_thinking_llm_lc,
-            self.deep_thinking_llm_lc,
-            self.toolkit,
-            self.tool_nodes,
-            self.bull_memory,
-            self.bear_memory,
-            self.trader_memory,
-            self.invest_judge_memory,
-            self.risk_manager_memory,
-            self.conditional_logic,
+            quick_thinking_llm_lc=self.quick_thinking_llm_lc, # Explicitly pass the correct instance
+            deep_thinking_llm_lc=self.deep_thinking_llm_lc,   # Explicitly pass the correct instance
+            toolkit=self.toolkit,
+            tool_nodes=self.tool_nodes,
+            bull_memory=self.bull_memory,
+            bear_memory=self.bear_memory,
+            trader_memory=self.trader_memory,
+            invest_judge_memory=self.invest_judge_memory,
+            risk_manager_memory=self.risk_manager_memory,
+            conditional_logic=self.conditional_logic,
+            agent_model_configs=self.config.get('agent_model_configs', {}) # Pass agent configs
         )
 
         self.propagator = Propagator()
-        # Pass the new llm_client to Reflector and SignalProcessor
-        self.reflector = Reflector(self.llm_client)
-        self.signal_processor = SignalProcessor(self.llm_client)
+
+        # Pass the BaseLLMClient and its specific config to Reflector and SignalProcessor
+        reflector_config = self.config.get('agent_model_configs', {}).get('Reflector', {})
+        self.reflector = Reflector(llm_client=self.llm_client, component_config=reflector_config)
+
+        signal_processor_config = self.config.get('agent_model_configs', {}).get('SignalProcessor', {})
+        self.signal_processor = SignalProcessor(llm_client=self.llm_client, component_config=signal_processor_config)
 
         # Set the llm_client for the interface module to ensure it uses the same instance
+        # Also pass its specific config if needed, or let it use the global client's config
         from tradingagents.dataflows import interface as dataflows_interface
-        dataflows_interface.set_interface_llm_client(self.llm_client)
+        interface_functions_config = self.config.get('agent_model_configs', {}).get('InterfaceFunctions', {})
+        dataflows_interface.set_interface_llm_client(self.llm_client, component_config=interface_functions_config)
 
         # State tracking
         self.curr_state = None

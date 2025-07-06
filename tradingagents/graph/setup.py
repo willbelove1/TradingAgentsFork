@@ -18,7 +18,7 @@ class GraphSetup:
     def __init__(
         self,
         quick_thinking_llm: ChatGoogleGenerativeAI,
-        deep_thinking_llm: ChatGoogleGenerativeAI,
+        deep_thinking_llm_lc: ChatGoogleGenerativeAI, # Renamed for clarity
         toolkit: Toolkit,
         tool_nodes: Dict[str, ToolNode],
         bull_memory,
@@ -27,12 +27,14 @@ class GraphSetup:
         invest_judge_memory,
         risk_manager_memory,
         conditional_logic: ConditionalLogic,
+        agent_model_configs: Dict[str, Any], # Added agent_model_configs
     ):
         """Initialize with required components."""
-        self.quick_thinking_llm = quick_thinking_llm
-        self.deep_thinking_llm = deep_thinking_llm
+        self.quick_thinking_llm_lc = quick_thinking_llm_lc
+        self.deep_thinking_llm_lc = deep_thinking_llm_lc
         self.toolkit = toolkit
         self.tool_nodes = tool_nodes
+        self.agent_model_configs = agent_model_configs # Store it
         self.bull_memory = bull_memory
         self.bear_memory = bear_memory
         self.trader_memory = trader_memory
@@ -61,52 +63,66 @@ class GraphSetup:
         tool_nodes = {}
 
         if "market" in selected_analysts:
-            analyst_nodes["market"] = create_market_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            cfg = self.agent_model_configs.get("MarketAnalyst", {})
+            llm_instance = self.quick_thinking_llm_lc if cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+            analyst_nodes["market"] = create_market_analyst(llm_instance, self.toolkit)
             delete_nodes["market"] = create_msg_delete()
             tool_nodes["market"] = self.tool_nodes["market"]
 
         if "social" in selected_analysts:
-            analyst_nodes["social"] = create_social_media_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            cfg = self.agent_model_configs.get("SocialMediaAnalyst", {})
+            llm_instance = self.quick_thinking_llm_lc if cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+            analyst_nodes["social"] = create_social_media_analyst(llm_instance, self.toolkit)
             delete_nodes["social"] = create_msg_delete()
             tool_nodes["social"] = self.tool_nodes["social"]
 
         if "news" in selected_analysts:
-            analyst_nodes["news"] = create_news_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            cfg = self.agent_model_configs.get("NewsAnalyst", {})
+            llm_instance = self.quick_thinking_llm_lc if cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+            analyst_nodes["news"] = create_news_analyst(llm_instance, self.toolkit)
             delete_nodes["news"] = create_msg_delete()
             tool_nodes["news"] = self.tool_nodes["news"]
 
         if "fundamentals" in selected_analysts:
-            analyst_nodes["fundamentals"] = create_fundamentals_analyst(
-                self.quick_thinking_llm, self.toolkit
-            )
+            cfg = self.agent_model_configs.get("FundamentalsAnalyst", {})
+            llm_instance = self.quick_thinking_llm_lc if cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+            analyst_nodes["fundamentals"] = create_fundamentals_analyst(llm_instance, self.toolkit)
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
         # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(
-            self.quick_thinking_llm, self.bull_memory
-        )
-        bear_researcher_node = create_bear_researcher(
-            self.quick_thinking_llm, self.bear_memory
-        )
-        research_manager_node = create_research_manager(
-            self.deep_thinking_llm, self.invest_judge_memory
-        )
-        trader_node = create_trader(self.quick_thinking_llm, self.trader_memory)
+        bull_cfg = self.agent_model_configs.get("BullResearcher", {})
+        bull_llm = self.quick_thinking_llm_lc if bull_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        bull_researcher_node = create_bull_researcher(bull_llm, self.bull_memory)
+
+        bear_cfg = self.agent_model_configs.get("BearResearcher", {})
+        bear_llm = self.quick_thinking_llm_lc if bear_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        bear_researcher_node = create_bear_researcher(bear_llm, self.bear_memory)
+
+        research_mgr_cfg = self.agent_model_configs.get("ResearchManager", {})
+        research_mgr_llm = self.quick_thinking_llm_lc if research_mgr_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        research_manager_node = create_research_manager(research_mgr_llm, self.invest_judge_memory)
+
+        trader_cfg = self.agent_model_configs.get("Trader", {})
+        trader_llm = self.quick_thinking_llm_lc if trader_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        trader_node = create_trader(trader_llm, self.trader_memory)
 
         # Create risk analysis nodes
-        risky_analyst = create_risky_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        safe_analyst = create_safe_debator(self.quick_thinking_llm)
-        risk_manager_node = create_risk_manager(
-            self.deep_thinking_llm, self.risk_manager_memory
-        )
+        risky_cfg = self.agent_model_configs.get("RiskyDebator", {})
+        risky_llm = self.quick_thinking_llm_lc if risky_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        risky_analyst = create_risky_debator(risky_llm)
+
+        neutral_cfg = self.agent_model_configs.get("NeutralDebator", {})
+        neutral_llm = self.quick_thinking_llm_lc if neutral_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        neutral_analyst = create_neutral_debator(neutral_llm)
+
+        safe_cfg = self.agent_model_configs.get("SafeDebator", {})
+        safe_llm = self.quick_thinking_llm_lc if safe_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        safe_analyst = create_safe_debator(safe_llm)
+
+        risk_mgr_cfg = self.agent_model_configs.get("RiskManager", {})
+        risk_mgr_llm = self.quick_thinking_llm_lc if risk_mgr_cfg.get("llm_instance_key") == self.agent_model_configs.get("langchain_quick_thinker_key") else self.deep_thinking_llm_lc
+        risk_manager_node = create_risk_manager(risk_mgr_llm, self.risk_manager_memory)
 
         # Create workflow
         workflow = StateGraph(AgentState)

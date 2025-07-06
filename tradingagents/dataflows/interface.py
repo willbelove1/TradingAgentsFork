@@ -23,30 +23,47 @@ from typing import Optional
 # This is one way to manage it; another is to pass client to each function.
 # For simplicity in refactoring existing functions, a module-level client can be easier.
 _interface_llm_client: Optional[BaseLLMClient] = None
+_interface_component_config: Dict = {} # To store config for these functions
 
 def _get_interface_llm_client() -> BaseLLMClient:
     """Initializes or returns the module-level LLM client."""
-    global _interface_llm_client
+    global _interface_llm_client, _interface_component_config
     if _interface_llm_client is None:
-        logger.info("Initializing module-level LLM client for dataflows.interface")
-        config = get_config()
-        client_config = config.copy()
-        if 'model' not in client_config:
-            client_config['model'] = config.get('default_model', 'gemini-pro' if config.get('llm_provider') == 'google' else 'gpt-3.5-turbo')
-        if 'embedding_model' not in client_config: # Not used by these text-gen funcs but good for consistency
-            client_config['embedding_model'] = config.get('embedding_model', 'models/embedding-001' if config.get('llm_provider') == 'google' else 'text-embedding-ada-002')
-        if config.get('llm_provider', '').lower() == 'openai' and 'openai_base_url' in config:
-            client_config['base_url'] = config['openai_base_url']
-            if 'openai_api_key' in config:
-                 client_config['api_key'] = config['openai_api_key']
-        _interface_llm_client = get_llm_client(config=client_config)
+        logger.info("Initializing module-level LLM client for dataflows.interface as it was not set externally.")
+        # This will use the global config, including model_settings.yaml
+        # The specific config for "InterfaceFunctions" from model_settings.yaml will be stored
+        # in _interface_component_config when set_interface_llm_client is called.
+        # If set_interface_llm_client is NOT called before first use here,
+        # _interface_component_config might be empty, and defaults will be used.
+        app_config = get_config() # This now includes model_settings.yaml
+        _interface_llm_client = get_llm_client(config=app_config)
+        # Try to grab InterfaceFunctions config if not set via explicit call
+        if not _interface_component_config:
+             _interface_component_config = app_config.get('agent_model_configs', {}).get('InterfaceFunctions', {})
+             logger.info(f"InterfaceFunctions config loaded internally: {_interface_component_config}")
+
     return _interface_llm_client
 
-def set_interface_llm_client(client: BaseLLMClient):
-    """Allows setting the LLM client externally, e.g., from TradingAgentsGraph."""
-    global _interface_llm_client
+def set_interface_llm_client(client: BaseLLMClient, component_config: Optional[Dict] = None):
+    """
+    Allows setting the LLM client and its specific configuration externally,
+    e.g., from TradingAgentsGraph.
+    Args:
+        client (BaseLLMClient): The LLM client instance.
+        component_config (Dict, optional): Configuration for interface functions.
+    """
+    global _interface_llm_client, _interface_component_config
     logger.info(f"External LLM client set for dataflows.interface: {client.__class__.__name__}")
     _interface_llm_client = client
+    if component_config is not None:
+        _interface_component_config = component_config
+        logger.info(f"Component config for dataflows.interface set: {_interface_component_config}")
+    else:
+        # If no specific config passed, try to get it from global config
+        app_config = get_config()
+        _interface_component_config = app_config.get('agent_model_configs', {}).get('InterfaceFunctions', {})
+        logger.info(f"Component config for dataflows.interface derived from global: {_interface_component_config}")
+
 
 def get_finnhub_news(
     ticker: Annotated[
@@ -757,8 +774,18 @@ def get_llm_generated_stock_news(ticker: str, curr_date: str) -> str:
     # Model name can be specified if we want to use a different one from client's default
     # e.g., client.config.get('quick_think_llm_model_name') or a hardcoded one.
     # For now, it uses the client's default model (likely from 'default_model' in config).
+    model_name = _interface_component_config.get('model', client.model_name)
+    temperature = _interface_component_config.get('temperature', 0.7)
+    max_tokens = _interface_component_config.get('max_tokens', 1024)
+
     try:
-        response_text = client.generate_text(prompt, temperature=0.7, max_tokens=1024)
+        logger.info(f"InterfaceFunctions (get_llm_generated_stock_news): Calling LLM. Model: {model_name}, Temp: {temperature}, MaxTokens: {max_tokens}")
+        response_text = client.generate_text(
+            prompt,
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
         return response_text
     except Exception as e:
         logger.error(f"Error in get_llm_generated_stock_news for {ticker} on {curr_date}: {e}")
@@ -776,8 +803,18 @@ def get_llm_generated_global_news(curr_date: str) -> str:
         f"that would be informative for financial trading purposes. "
         f"If you have access to real-time or very recent information, please use it. Otherwise, base your summary on your general knowledge up to your last training cut-off."
     )
+    model_name = _interface_component_config.get('model', client.model_name)
+    temperature = _interface_component_config.get('temperature', 0.7)
+    max_tokens = _interface_component_config.get('max_tokens', 1024)
+
     try:
-        response_text = client.generate_text(prompt, temperature=0.7, max_tokens=1024)
+        logger.info(f"InterfaceFunctions (get_llm_generated_global_news): Calling LLM. Model: {model_name}, Temp: {temperature}, MaxTokens: {max_tokens}")
+        response_text = client.generate_text(
+            prompt,
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
         return response_text
     except Exception as e:
         logger.error(f"Error in get_llm_generated_global_news for {curr_date}: {e}")
@@ -796,8 +833,18 @@ def get_llm_generated_fundamentals(ticker: str, curr_date: str) -> str:
         f"Present this information in a clear, structured format, ideally as a table or itemized list. "
         f"If you have access to real-time or very recent financial data, please use it. Otherwise, base your analysis on your general knowledge up to your last training cut-off."
     )
+    model_name = _interface_component_config.get('model', client.model_name)
+    temperature = _interface_component_config.get('temperature', 0.5)
+    max_tokens = _interface_component_config.get('max_tokens', 1500)
+
     try:
-        response_text = client.generate_text(prompt, temperature=0.5, max_tokens=1500) # More tokens for potentially structured output
+        logger.info(f"InterfaceFunctions (get_llm_generated_fundamentals): Calling LLM. Model: {model_name}, Temp: {temperature}, MaxTokens: {max_tokens}")
+        response_text = client.generate_text(
+            prompt,
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
         return response_text
     except Exception as e:
         logger.error(f"Error in get_llm_generated_fundamentals for {ticker} on {curr_date}: {e}")

@@ -8,10 +8,22 @@ from tradingagents.llm_clients import BaseLLMClient # Import BaseLLMClient
 class Reflector:
     """Handles reflection on decisions and updating memory."""
 
-    def __init__(self, llm_client: BaseLLMClient): # Changed parameter type
-        """Initialize the reflector with an LLM client."""
-        self.llm_client = llm_client # Store the client
+    def __init__(self, llm_client: BaseLLMClient, component_config: Dict = None):
+        """
+        Initialize the reflector with an LLM client and component-specific configuration.
+        Args:
+            llm_client (BaseLLMClient): The LLM client instance.
+            component_config (Dict, optional): Configuration for this component, potentially
+                                               containing 'model', 'temperature', 'max_tokens'.
+        """
+        self.llm_client = llm_client
+        self.component_config = component_config if component_config else {}
         self.reflection_system_prompt = self._get_reflection_prompt()
+        # Potentially override default model from llm_client if specified in component_config
+        self.model_name = self.component_config.get('model', self.llm_client.model_name)
+        self.temperature = self.component_config.get('temperature', 0.6) # Default from previous hardcoding
+        self.max_tokens = self.component_config.get('max_tokens', 2048)  # Default from previous hardcoding
+
 
     def _get_reflection_prompt(self) -> str:
         """Get the system prompt for reflection."""
@@ -70,14 +82,15 @@ Adhere strictly to these instructions, and ensure your output is detailed, accur
                       f"Objective Market Reports for Reference:\n{situation}\n\n" \
                       f"Based on all the above, provide your step-by-step analysis, improvement suggestions, summary, and query."
 
-        # Using the llm_client's generate_text method
-        # We might need to adjust temperature or max_tokens if necessary,
-        # or pass them from a config if they vary per reflection type.
-        # The llm_client's config should have a default model, or it can be specified here.
+        from tradingagents.llm_clients.base_client import logger as client_logger # Use the same logger for context
+        client_logger.info(f"Reflector: Calling LLM. Model: {self.model_name}, Temperature: {self.temperature}, Max Tokens: {self.max_tokens}, Component: {component_type}")
+
+        # Using the llm_client's generate_text method with model and parameters from component_config
         result = self.llm_client.generate_text(
             prompt=full_prompt,
-            temperature=0.5, # Example temperature, can be configured
-            max_tokens=2048   # Example max_tokens, ensure it's adequate
+            model=self.model_name,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens
         )
         return result
 
