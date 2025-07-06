@@ -128,11 +128,8 @@ class GeminiClient(BaseLLMClient):
             raise LLMKeyCycleError("Unexpected error getting next API key", original_exception=e) from e
 
 
-    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str]) -> str:
-        # `current_api_key_for_request` is the key that BaseLLMClient._get_current_api_key_for_request (our override)
-        # has just configured for this attempt. We log it but don't need to use it directly for genai.GenerativeModel
-        # as genai.configure() is global for the SDK.
-        current_model_name = model # `model` is the effective_model (default or override)
+    def _generate_text_impl(self, prompt: str, temperature: float, max_tokens: Optional[int], model: str, current_api_key_for_request: Optional[str], agent_name: Optional[str] = None) -> str:
+        current_model_name = model
 
         generation_config = genai.types.GenerationConfig(
             temperature=temperature

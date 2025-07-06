@@ -181,13 +181,27 @@ with st.sidebar:
     run_button = st.button("🚀 Run Analysis", type="primary", disabled=st.session_state.analysis_running)
 
 
+from tradingagents.utils.cost_tracker import get_usage_summary # Import cost_tracker
+
 # --- Main Content Area ---
 status_placeholder = st.empty()
 progress_area = st.container() # For agent statuses
 main_display_area = st.container() # For tabs
 
 with main_display_area:
-    tab_logs, tab_reports = st.tabs(["Live Logs", "Current/Final Report"])
+    tab_run, tab_logs, tab_reports, tab_analytics = st.tabs([
+        "📊 Run Analysis", "📜 Live Logs", "📑 Current/Final Report", "📈 Usage Analytics"
+    ])
+
+    # Tab: Run Analysis (to contain current report parts during run) - or integrate into Reports tab better
+    with tab_run:
+        # This tab could show the "Current Report Snippet" while analysis is running
+        # and then switch to "Final Report" in the other tab.
+        # For now, current_report_markdown is shown in tab_reports.
+        # This tab can be a placeholder or used for more dynamic "current step" info.
+        st.caption("Analysis progress and current outputs will be shown here or in the 'Current/Final Report' tab.")
+        current_step_display_area = st.empty()
+
 
     with tab_logs:
         log_display_area = st.empty()
@@ -198,13 +212,61 @@ with main_display_area:
         if st.session_state.final_report_markdown:
             report_display_area.markdown(st.session_state.final_report_markdown)
         elif st.session_state.current_report_markdown:
-            report_display_area.markdown(st.session_state.current_report_markdown)
+            # Display current report in the "Run Analysis" tab for live updates during run
+            with tab_run: # This ensures it updates the correct tab
+                 current_step_display_area.markdown(st.session_state.current_report_markdown)
+            report_display_area.info("Analysis in progress... Current updates in 'Run Analysis' tab. Final report will appear here.")
         else:
             report_display_area.info("Reports will appear here once the analysis starts.")
+
+    with tab_analytics:
+        st.subheader("LLM Usage Analytics")
+
+        # Add filters for analytics
+        st.markdown("#### Filter Usage Data")
+        analytics_cols = st.columns(4)
+        analytics_provider = analytics_cols[0].selectbox("Provider", options=["All"] + get_llm_provider_choices_dashboard(), key="analytics_provider")
+        # TODO: Populate model choices based on selected provider and available models in CSV
+        analytics_model = analytics_cols[1].text_input("Model (contains)", key="analytics_model")
+        analytics_agent = analytics_cols[2].text_input("Agent Name (exact)", key="analytics_agent")
+        analytics_key_id = analytics_cols[3].text_input("API Key ID (contains)", key="analytics_key_id")
+
+        # Date range for analytics
+        analytics_date_cols = st.columns(2)
+        analytics_start_date = analytics_date_cols[0].date_input("Start Date", value=None, key="analytics_start_date")
+        analytics_end_date = analytics_date_cols[1].date_input("End Date", value=None, key="analytics_end_date")
+
+        if st.button("Load Usage Data", key="load_analytics"):
+            summary_df = get_usage_summary(
+                provider_filter=None if analytics_provider == "All" else analytics_provider,
+                model_filter=analytics_model if analytics_model else None,
+                agent_filter=analytics_agent if analytics_agent else None,
+                key_filter=analytics_key_id if analytics_key_id else None,
+                date_range=(
+                    analytics_start_date.strftime('%Y-%m-%d') if analytics_start_date else None,
+                    analytics_end_date.strftime('%Y-%m-%d') if analytics_end_date else None,
+                )
+            )
+            if summary_df is not None and not summary_df.empty:
+                st.write("### Usage Summary")
+                st.dataframe(summary_df)
+
+                # Simple total cost display
+                total_cost = summary_df['total_estimated_cost_usd'].sum()
+                st.metric("Total Estimated Cost (Filtered)", f"${total_cost:,.4f}")
+
+            elif summary_df is not None and summary_df.empty:
+                st.info("No usage data found matching the filters.")
+            else:
+                st.error("Could not load usage data. Check logs/llm_usage.csv.")
 
 
 # --- Analysis Logic ---
 if run_button:
+    # Clear previous run's "current" display in the run tab
+    with tab_run:
+        current_step_display_area.empty()
+
     st.session_state.analysis_running = True
     st.session_state.current_status_text = "Starting analysis..."
     st.session_state.final_report_markdown = ""

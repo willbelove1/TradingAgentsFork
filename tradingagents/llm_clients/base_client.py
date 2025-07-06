@@ -116,6 +116,12 @@ class BaseLLMClient(abc.ABC):
             reraise=True # Re-raise the last exception if all retries fail
         )
 
+import csv
+import datetime
+import os
+from tradingagents.config.pricing_loader import load_llm_pricing, get_model_cost
+
+
     def _get_current_api_key_for_request(self) -> Optional[str]:
         """
         Placeholder for subclasses (like multi-key clients) to override.
@@ -123,94 +129,181 @@ class BaseLLMClient(abc.ABC):
         Multi-key clients will implement cycling logic here.
         This key is primarily for logging and for SDK configuration if needed per call.
         """
-        return self.api_key
+        # For single-key clients, self.api_key might come from direct init, config, or env.
+        # If list of keys is in self.config['api_keys'], multi-key client should use that.
+        # This base method assumes a single key context; multi-key clients override it.
+        if isinstance(self.config.get("api_keys"), list) and self.config["api_keys"]:
+             # This case should ideally be handled by a multi-key subclass overriding this method.
+             # For BaseLLMClient itself, if it encounters a list, it's ambiguous which one to use.
+             # However, GeminiClient (multi-key) overrides this. OpenAIClient (single-key) does not.
+             # If this BaseLLMClient is used directly with a list of keys in config (which it shouldn't),
+             # it would be an issue. So, this is mostly for single key scenarios or as a fallback.
+            logger.debug("BaseLLMClient._get_current_api_key_for_request found list of keys in config, but not a multi-key client. Using constructor api_key or first from list if available.")
+            return self.api_key or self.config["api_keys"][0]
+        return self.api_key or os.getenv("API_KEY_GENERIC_ENV_VAR") # Fallback, specific clients handle better
 
-    def generate_text(self, prompt: str, temperature: float = 0.7, max_tokens: Optional[int] = 1500, model: Optional[str] = None) -> str:
+    def generate_text(self, prompt: str, temperature: float = 0.7, max_tokens: Optional[int] = 1500, model: Optional[str] = None,
+                      agent_name: Optional[str] = None) -> str: # Added agent_name
         start_time = time.time()
         effective_model = model or self.model_name
         if not effective_model:
             raise LLMConfigurationError(f"{self.__class__.__name__}: No model specified for generate_text and no default text model configured.")
 
-        api_key_for_this_call = None # Will be set inside the retried function if multi-key
+        api_key_for_this_call = None
+        result = "" # Ensure result is defined
 
-        # Define the function to be retried
         def _try_generate():
-            nonlocal api_key_for_this_call # Allow modification of outer scope variable
-            # For multi-key clients, _get_current_api_key_for_request will handle cycling & configuration.
-            # For single-key, it just returns self.api_key (or the one from env).
+            nonlocal api_key_for_this_call, result # Allow modification
             api_key_for_this_call = self._get_current_api_key_for_request()
-            logger.debug(f"Attempting generate_text with model {effective_model} (Key: {'HIDDEN' if api_key_for_this_call else 'None'}). Prompt: \"{prompt[:100]}...\"")
-            return self._generate_text_impl(prompt, temperature, max_tokens, effective_model, api_key_for_this_call)
+            # Log actual key hash/id if needed for tracking, not the full key. For now, 'HIDDEN'.
+            key_display = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
+            logger.debug(f"Attempting generate_text with model {effective_model} (Key: {key_display}). Prompt: \"{prompt[:100]}...\"")
+            result = self._generate_text_impl(prompt, temperature, max_tokens, effective_model, api_key_for_this_call)
+            return result # Tenacity expects the retried function to return the result
 
         try:
             decorated_try_generate = self._get_retry_decorator()(_try_generate)
-            result = decorated_try_generate()
+            result = decorated_try_generate() # This will assign to outer 'result' if successful
             return result
-        except LLMBaseException: # Re-raise our custom errors directly
+        except LLMBaseException:
             raise
-        except Exception as e: # Wrap other unexpected errors
+        except Exception as e:
             logger.error(f"Unexpected, non-LLMBaseException error during generate_text with model {effective_model}: {e.__class__.__name__} - {e}")
-            self._handle_api_error(e, operation_name="generate_text", model_name=effective_model, api_key_used=api_key_for_this_call) # Will re-raise
-            return "" # Should not be reached if _handle_api_error re-raises
+            self._handle_api_error(e, operation_name="generate_text", model_name=effective_model, api_key_used=api_key_for_this_call)
+            return "" # Should not be reached if _handle_api_error re-raises (which it does)
         finally:
             end_time = time.time()
-            key_info = f"(Key: {'HIDDEN' if api_key_for_this_call else 'None'})" if api_key_for_this_call is not None else "" # Check if it was set
-            logger.info(f"generate_text call for model {effective_model} {key_info} completed. Duration: {end_time - start_time:.2f}s")
+            duration_seconds = end_time - start_time
+            # _log_usage is now called by the _impl methods in subclasses after successful call,
+            # because they have access to token counts.
+            # However, the overall duration and key used for the final successful/failed attempt is logged here.
+            key_display_final = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
+            logger.info(f"generate_text call for model {effective_model} (Key: {key_display_final}) by agent '{agent_name or 'Unknown'}' completed. Duration: {duration_seconds:.2f}s")
+            # If _log_usage needs to be called from here with final attempt data (if _impl doesn't have all info)
+            # This would be if _impl doesn't call _log_usage itself.
+            # For now, assume _impl calls _log_usage with token counts.
+            # If result is successfully obtained, _impl should have called _log_usage.
+            # If an error occurred and was re-raised, then _log_usage for tokens might not have been called.
 
-
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def get_embedding(self, text: str, model: Optional[str] = None,
+                      agent_name: Optional[str] = None) -> List[float]: # Added agent_name
         start_time = time.time()
         effective_model = model or self.embedding_model_name
         if not effective_model:
             raise LLMConfigurationError(f"{self.__class__.__name__}: No model specified for get_embedding and no default embedding model configured.")
 
         api_key_for_this_call = None
+        result_embedding: List[float] = []
 
         def _try_embed():
-            nonlocal api_key_for_this_call
+            nonlocal api_key_for_this_call, result_embedding
             api_key_for_this_call = self._get_current_api_key_for_request()
-            logger.debug(f"Attempting get_embedding for model {effective_model} (Key: {'HIDDEN' if api_key_for_this_call else 'None'}). Text: \"{text[:100]}...\"")
-            return self._get_embedding_impl(text, effective_model, api_key_for_this_call)
+            key_display = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
+            logger.debug(f"Attempting get_embedding for model {effective_model} (Key: {key_display}). Text: \"{text[:100]}...\"")
+            result_embedding = self._get_embedding_impl(text, effective_model, api_key_for_this_call)
+            return result_embedding
 
         try:
             decorated_try_embed = self._get_retry_decorator()(_try_embed)
-            result = decorated_try_embed()
-            return result
+            result_embedding = decorated_try_embed()
+            return result_embedding
         except LLMBaseException:
             raise
         except Exception as e:
             logger.error(f"Unexpected, non-LLMBaseException error during get_embedding with model {effective_model}: {e.__class__.__name__} - {e}")
             self._handle_api_error(e, operation_name="get_embedding", model_name=effective_model, api_key_used=api_key_for_this_call)
-            return [] # Should not be reached
+            return []
         finally:
             end_time = time.time()
-            key_info = f"(Key: {'HIDDEN' if api_key_for_this_call else 'None'})" if api_key_for_this_call is not None else ""
-            logger.info(f"get_embedding call for model {effective_model} {key_info} completed. Duration: {end_time - start_time:.2f}s")
-
-    # def chat(...) would follow a similar pattern
+            duration_seconds = end_time - start_time
+            key_display_final = f"...{api_key_for_this_call[-4:]}" if api_key_for_this_call and len(api_key_for_this_call) > 4 else "Default/Env"
+            logger.info(f"get_embedding call for model {effective_model} (Key: {key_display_final}) by agent '{agent_name or 'Unknown'}' completed. Duration: {duration_seconds:.2f}s")
+            # As with generate_text, assume _get_embedding_impl calls _log_usage if it has token data.
 
     def _handle_api_error(self, error: Exception, operation_name: str, model_name: str, api_key_used: Optional[str]):
-        key_info = f"(Key: {'HIDDEN' if api_key_used else 'None'})" if api_key_used is not None else ""
-        logger.error(f"API Error during {operation_name} with model {model_name} {key_info}: {error.__class__.__name__} - {error}")
+        key_display = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 4 else "Default/Env"
+        logger.error(f"API Error during {operation_name} with model {model_name} (Key: {key_display}): {error.__class__.__name__} - {error}")
         if not isinstance(error, LLMBaseException):
-            # Wrap unknown errors into a generic LLMBaseException if not already one of our custom types.
-            # This helps ensure that callers can expect LLMBaseException or its children.
             raise LLMBaseException(f"Unhandled error during {operation_name}: {error}") from error
-        raise error # Re-raise the (potentially wrapped) error
+        raise error
 
     def _log_usage(self, model_name: str,
+                   duration_seconds: float, # Added duration
                    prompt_tokens: Optional[int] = None,
                    completion_tokens: Optional[int] = None,
                    total_tokens: Optional[int] = None,
-                   api_key_used: Optional[str] = None):
-        usage_parts = [f"Model: {model_name}"]
-        if api_key_used: # In a multi-key setup, knowing which key was used for a successful call is useful
-            usage_parts.append(f"Key: {'HIDDEN'}") # Don't log actual key value for security
-        if prompt_tokens is not None: usage_parts.append(f"PromptTokens: {prompt_tokens}")
-        if completion_tokens is not None: usage_parts.append(f"CompletionTokens: {completion_tokens}")
-        if total_tokens is not None: usage_parts.append(f"TotalTokens: {total_tokens}")
+                   api_key_used: Optional[str] = None,
+                   agent_name: Optional[str] = None, # Added agent_name
+                   success: bool = True): # Added success status
 
-        if len(usage_parts) > (2 if api_key_used else 1) : # Log if more than just model/key
-            logger.info(f"TokenUsage - {', '.join(usage_parts)}")
-        else:
-            logger.debug(f"Token usage details not available for this call with {model_name}.")
+        # Basic console logging (existing behavior, slightly enhanced)
+        log_message_parts = [f"Model: {model_name}"]
+        key_display = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 4 else "Default/Env"
+        log_message_parts.append(f"Key: {key_display}")
+        if agent_name: log_message_parts.append(f"Agent: {agent_name}")
+        log_message_parts.append(f"Duration: {duration_seconds:.2f}s")
+        if prompt_tokens is not None: log_message_parts.append(f"PromptTokens: {prompt_tokens}")
+        if completion_tokens is not None: log_message_parts.append(f"CompletionTokens: {completion_tokens}")
+        if total_tokens is not None: log_message_parts.append(f"TotalTokens: {total_tokens}")
+        log_message_parts.append(f"Success: {success}")
+        logger.info(f"LLMCallLog - {', '.join(log_message_parts)}")
+
+        # CSV Logging
+        log_dir = "logs"
+        csv_filepath = os.path.join(log_dir, "llm_usage.csv")
+
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+
+            # Cost Estimation
+            estimated_cost_usd = 0.0
+            pricing_data = load_llm_pricing() # Loads from config/llm_pricing.yaml
+            # Provider name needs to be determined. Assuming it's part of self.config or class name.
+            # This is a bit tricky as BaseLLMClient doesn't know its concrete provider name easily.
+            # Let's assume self.config['llm_provider'] holds the provider name (e.g. "google", "openai")
+            provider_name = self.config.get('llm_provider', 'unknown_provider').lower()
+
+            cost_info = get_model_cost(provider_name, model_name, pricing_config=pricing_data)
+
+            if cost_info:
+                input_cost = cost_info.get('input_cost_per_million_tokens', 0.0)
+                output_cost = cost_info.get('output_cost_per_million_tokens', 0.0)
+
+                if prompt_tokens is not None:
+                    estimated_cost_usd += (prompt_tokens / 1_000_000) * input_cost
+                if completion_tokens is not None: # Text generation
+                    estimated_cost_usd += (completion_tokens / 1_000_000) * output_cost
+                elif total_tokens is not None and prompt_tokens is None: # Embeddings might only report total_tokens
+                    # Assume total_tokens for embeddings are input tokens for costing
+                    estimated_cost_usd += (total_tokens / 1_000_000) * input_cost
+            else:
+                logger.warning(f"No pricing info found for {provider_name}/{model_name}. Cost will be 0.")
+
+            file_exists = os.path.isfile(csv_filepath)
+            with open(csv_filepath, 'a', newline='', encoding='utf-8') as csvfile:
+                fieldnames = [
+                    'timestamp', 'provider_name', 'api_key_identifier', 'agent_name',
+                    'model_name', 'prompt_tokens', 'completion_tokens', 'total_tokens',
+                    'duration_seconds', 'estimated_cost_usd', 'success'
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                if not file_exists or os.path.getsize(csv_filepath) == 0:
+                    writer.writeheader()
+
+                api_key_identifier = f"...{api_key_used[-4:]}" if api_key_used and len(api_key_used) > 3 else "default"
+
+                writer.writerow({
+                    'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'provider_name': provider_name,
+                    'api_key_identifier': api_key_identifier,
+                    'agent_name': agent_name or "Unknown",
+                    'model_name': model_name,
+                    'prompt_tokens': prompt_tokens if prompt_tokens is not None else 0,
+                    'completion_tokens': completion_tokens if completion_tokens is not None else 0,
+                    'total_tokens': total_tokens if total_tokens is not None else (prompt_tokens or 0) + (completion_tokens or 0),
+                    'duration_seconds': round(duration_seconds, 3),
+                    'estimated_cost_usd': round(estimated_cost_usd, 8),
+                    'success': success
+                })
+        except Exception as e:
+            logger.error(f"Failed to write to LLM usage CSV log: {e}", exc_info=True)
