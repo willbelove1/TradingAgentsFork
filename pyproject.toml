@@ -33,6 +33,7 @@ dependencies = [
     "yfinance>=0.2.63",
     "python-dotenv>=1.0.0",
     "PyYAML>=6.0",
+    "streamlit>=1.30", # Added streamlit
 ]
 
 [project.optional-dependencies]

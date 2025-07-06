@@ -28,3 +28,4 @@ python-dotenv
 PyYAML
 pytest
 pytest-mock
+streamlit
